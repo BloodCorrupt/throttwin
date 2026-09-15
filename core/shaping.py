@@ -76,6 +76,8 @@ class TrafficShaper:
         self.my_mac     = my_mac
         self.stop_event = stop_event
 
+        self.observed_ipv6_addrs = set()
+
         rate_bps = int(limit_mbps * 1_000_000 / 8)
         self.bucket = TokenBucket(rate_bps)
 
@@ -112,14 +114,14 @@ class TrafficShaper:
     def _sniffer(self):
         """Capture both IPv4 and IPv6 packets from the intercepted target on our interface with auto-recovery."""
         from scapy.all import sniff
-        from .network import get_scapy_interface, mac_to_ipv6_ll
+        from .network import get_scapy_interface
 
         # Capture:
         # 1. Upstream: all packets sent from target MAC (both IPv4 and IPv6)
-        # 2. Downstream: all packets returning from router to target IP / target IPv6 link-local
+        # 2. Downstream IPv4: all packets returning from router to target IPv4
+        # 3. Downstream IPv6: all intercepted IPv6 packets from router to our MAC
         if self.target_mac and self.target_mac not in ("unknown", "Unknown", "-", ""):
-            target_ll = mac_to_ipv6_ll(self.target_mac)
-            bpf = f"(ether src {self.target_mac}) or (dst host {self.target_ip}) or (dst host {target_ll})"
+            bpf = f"(ether src {self.target_mac}) or (dst host {self.target_ip}) or (ether src {self.router_mac} and ip6 and ether dst {self.my_mac})"
         else:
             bpf = f"src host {self.target_ip} or dst host {self.target_ip}"
 
@@ -154,11 +156,34 @@ class TrafficShaper:
             npf_iface = get_scapy_interface(self.interface)
 
             target_mac_lower = (self.target_mac or "").lower()
+            router_mac_lower = (self.router_mac or "").lower()
+            my_mac_lower = (self.my_mac or "").lower()
 
             while not self.stop_event.is_set():
                 try:
                     pkt = self._pkt_queue.get(timeout=0.5)
                 except queue.Empty:
+                    continue
+
+                if Ether not in pkt:
+                    continue
+
+                pkt_src_mac = pkt[Ether].src.lower()
+                pkt_dst_mac = pkt[Ether].dst.lower()
+
+                # Avoid looping our own forwarded packets
+                if pkt_src_mac == my_mac_lower:
+                    continue
+
+                # Dynamically learn target's outbound IPv6 addresses
+                if IPv6 in pkt and pkt_src_mac == target_mac_lower:
+                    self.observed_ipv6_addrs.add(pkt[IPv6].src.lower())
+
+                # Classify stream direction:
+                is_upstream = (pkt_src_mac == target_mac_lower) or (IP in pkt and pkt[IP].src == self.target_ip)
+                is_downstream = (IP in pkt and pkt[IP].dst == self.target_ip) or (IPv6 in pkt and pkt[IPv6].dst.lower() in self.observed_ipv6_addrs) or (pkt_src_mac == router_mac_lower and pkt_dst_mac == my_mac_lower)
+
+                if not is_upstream and not is_downstream:
                     continue
 
                 pkt_len = len(pkt)
@@ -173,16 +198,21 @@ class TrafficShaper:
                 # Packets FROM target → send to router MAC
                 # Packets TO target   → send to target MAC
                 try:
-                    pkt_src_mac = pkt[Ether].src.lower() if Ether in pkt else ""
-                    if IP in pkt:
-                        is_upstream = (pkt[IP].src == self.target_ip) or (target_mac_lower and pkt_src_mac == target_mac_lower)
-                        dst_mac = self.router_mac if is_upstream else self.target_mac
-                        fwd = Ether(src=self.my_mac, dst=dst_mac) / pkt[IP]
+                    if is_upstream:
+                        if IP in pkt:
+                            fwd = Ether(src=self.my_mac, dst=self.router_mac) / pkt[IP]
+                        elif IPv6 in pkt:
+                            fwd = Ether(src=self.my_mac, dst=self.router_mac) / pkt[IPv6]
+                        else:
+                            fwd = Ether(src=self.my_mac, dst=self.router_mac) / pkt.payload
                         sendp(fwd, iface=npf_iface, verbose=0)
-                    elif IPv6 in pkt:
-                        is_upstream = bool(target_mac_lower and pkt_src_mac == target_mac_lower)
-                        dst_mac = self.router_mac if is_upstream else self.target_mac
-                        fwd = Ether(src=self.my_mac, dst=dst_mac) / pkt[IPv6]
+                    else:
+                        if IP in pkt:
+                            fwd = Ether(src=self.my_mac, dst=self.target_mac) / pkt[IP]
+                        elif IPv6 in pkt:
+                            fwd = Ether(src=self.my_mac, dst=self.target_mac) / pkt[IPv6]
+                        else:
+                            fwd = Ether(src=self.my_mac, dst=self.target_mac) / pkt.payload
                         sendp(fwd, iface=npf_iface, verbose=0)
                 except Exception as e:
                     log.debug(f"Forward error (interface reconnecting?): {e}")
