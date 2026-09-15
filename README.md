@@ -163,7 +163,7 @@ Total: 0.94 Mbps  |  Transferred: 4.2 MB  |  Uptime: 00:04:12  |  Ctrl+C to stop
 |-----------|-------------------|---------------------|
 | ARP Spoofing | `arpspoof` binary | Scapy `sendp()` via Npcap |
 | Traffic Shaping | Linux `tc` HTB qdisc | Pure-Python Token Bucket + Scapy packet forwarder |
-| Network Scanner | `arp-scan` binary | Scapy `srp()` + `arp -a` cache |
+| Network Scanner | `arp-scan` binary | Win32 `SendARP` (256-thread) + NetBIOS/mDNS + 53K IEEE OUI DB |
 | IP Forwarding | `/proc/sys/net/ipv4/ip_forward` | `netsh` + Registry key |
 | Privileges | `sudo` / root | Windows Administrator |
 
