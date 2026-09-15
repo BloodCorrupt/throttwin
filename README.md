@@ -2,7 +2,7 @@
 
 Windows-native per-device bandwidth limiter via ARP spoofing — the Windows equivalent of [Throttnux Plus](../throttnux), powered by **Scapy** and **Npcap**.
 
-> **Windows only.** For Linux, use [Throttnux Plus](../throttnux) instead.
+> **Windows only.** For Linux, use [Throttnux Plus](https://github.com/BloodCorrupt/throttwin) instead.
 
 ## How It Works
 
