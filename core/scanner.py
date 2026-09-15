@@ -261,15 +261,28 @@ def _lan_wakeup_probe(ips):
         pass
 
 
-def _get_arp_cache(router_ip=None):
+def _get_arp_cache(interface_ip=None, subnet_net=None, router_ip=None):
     """
-    Parse Windows `arp -a` cache table.
+    Parse Windows `arp -a` cache table, strictly scoped to the interface and subnet.
     """
     devices = []
     try:
-        res = subprocess.run("arp -a", capture_output=True, text=True, shell=True)
+        cmd = f"arp -a -N {interface_ip}" if interface_ip else "arp -a"
+        res = subprocess.run(cmd, capture_output=True, text=True, shell=True)
+        current_iface_ip = None
         for line in res.stdout.splitlines():
-            parts = line.split()
+            line_str = line.strip()
+            if line_str.startswith("Interface:"):
+                m = re.search(r"Interface:\s*(\d+\.\d+\.\d+\.\d+)", line_str)
+                if m:
+                    current_iface_ip = m.group(1)
+                continue
+
+            # If interface_ip is known and output has multiple interfaces, enforce matching section
+            if interface_ip and current_iface_ip and current_iface_ip != interface_ip:
+                continue
+
+            parts = line_str.split()
             if len(parts) >= 3 and re.match(r"^\d+\.\d+\.\d+\.\d+$", parts[0]):
                 ip  = parts[0]
                 mac = parts[1].replace("-", ":").lower()
@@ -278,8 +291,17 @@ def _get_arp_cache(router_ip=None):
                         and not ip.endswith(".255")
                         and not ip.startswith("224.")
                         and not ip.startswith("239.")
+                        and not ip.startswith("127.")
+                        and not ip.startswith("169.254.")
                         and ip != "255.255.255.255"
-                        and ip != router_ip):
+                        and ip != router_ip
+                        and ip != interface_ip):
+                    if subnet_net:
+                        try:
+                            if ipaddress.ip_address(ip) not in subnet_net:
+                                continue
+                        except Exception:
+                            continue
                     vendor = oui_lookup(mac)
                     devices.append({"ip": ip, "mac": mac, "vendor": vendor, "hostname": ""})
     except Exception as e:
@@ -291,16 +313,17 @@ def arp_scan(interface, router_ip, progress_callback=None):
     """
     BEAST-MODE Multi-Vector Hybrid Network Scanner for Windows:
       1. Computes local subnet from interface IPv4 & netmask.
-      2. Fires fast multi-protocol wake-up probe.
-      3. Sweeps all subnet IPs simultaneously using native Win32 SendARP (ThreadPool 256).
-      4. Merges with Windows kernel ARP table (`arp -a`).
-      5. Runs multi-protocol NetBIOS, mDNS, and Reverse DNS name queries concurrently.
-      6. Applies rich OUI vendor intelligence and MAC randomization detection.
+      2. Sweeps all subnet IPs simultaneously using native Win32 SendARP bound to interface.
+      3. Merges with Windows kernel ARP table (`arp -a -N interface_ip`) strictly for this subnet.
+      4. Runs multi-protocol NetBIOS, mDNS, and Reverse DNS name queries concurrently.
+      5. Applies rich OUI vendor intelligence and MAC randomization detection.
     """
     devices = []
 
-    # 1. Determine local subnet IPs
+    # 1. Determine local subnet IPs & interface IP
     subnet_ips = []
+    subnet_net = None
+    my_ip = None
     try:
         import psutil
         addrs = psutil.net_if_addrs().get(interface, [])
@@ -308,33 +331,33 @@ def arp_scan(interface, router_ip, progress_callback=None):
                and not a.address.startswith("169.254") and a.address != "127.0.0.1"]
         if ip4:
             my_ip, netmask = ip4[0]
-            net = ipaddress.IPv4Network(f"{my_ip}/{netmask}", strict=False)
-            subnet_ips = [str(ip) for ip in net.hosts()]
+            subnet_net = ipaddress.IPv4Network(f"{my_ip}/{netmask}", strict=False)
+            subnet_ips = [str(ip) for ip in subnet_net.hosts()]
         else:
             # Fallback based on router_ip
             if router_ip and router_ip != "0.0.0.0":
-                prefix = ".".join(router_ip.split(".")[:3])
-                subnet_ips = [f"{prefix}.{i}" for i in range(1, 255)]
+                subnet_net = ipaddress.IPv4Network(f"{router_ip}/24", strict=False)
+                subnet_ips = [str(ip) for ip in subnet_net.hosts()]
     except Exception as e:
         log.warning(f"Could not compute subnet for {interface}: {e}")
         if router_ip and router_ip != "0.0.0.0":
-            prefix = ".".join(router_ip.split(".")[:3])
-            subnet_ips = [f"{prefix}.{i}" for i in range(1, 255)]
+            subnet_net = ipaddress.IPv4Network(f"{router_ip}/24", strict=False)
+            subnet_ips = [str(ip) for ip in subnet_net.hosts()]
 
     if not subnet_ips:
-        return _get_arp_cache(router_ip)
+        return _get_arp_cache(interface_ip=my_ip, subnet_net=subnet_net, router_ip=router_ip)
 
     # Limit scan to max 512 IPs if large subnet to maintain extreme speed
     if len(subnet_ips) > 512:
         subnet_ips = subnet_ips[:512]
 
-    # 2. Parallel Native Win32 SendARP sweep across all subnet IPs
+    # 2. Parallel Native Win32 SendARP sweep across all subnet IPs bound to this adapter
     discovered = {}
     
     def _scan_single_ip(target_ip):
-        if target_ip == router_ip:
+        if target_ip == router_ip or target_ip == my_ip:
             return None
-        mac = win_send_arp(target_ip)
+        mac = win_send_arp(target_ip, src_ip=my_ip)
         if mac and mac not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
             return (target_ip, mac)
         return None
@@ -351,37 +374,62 @@ def arp_scan(interface, router_ip, progress_callback=None):
     except Exception as e:
         log.debug(f"Win32 SendARP sweep exception: {e}")
 
-    # 4. Harvest Windows Kernel ARP Cache
-    cache_devs = _get_arp_cache(router_ip)
+    # 3. Harvest Windows Kernel ARP Cache for this interface only
+    cache_devs = _get_arp_cache(interface_ip=my_ip, subnet_net=subnet_net, router_ip=router_ip)
     for dev in cache_devs:
         ip = dev["ip"]
         mac = dev["mac"]
-        if ip not in discovered and mac:
+        if ip not in discovered and mac and ip != my_ip and ip != router_ip:
             discovered[ip] = mac
 
-    # 5. Build device list and resolve OUI vendors
+    # 4. Build device list, enforce subnet boundary, and resolve OUI vendors
     for ip, mac in discovered.items():
+        if subnet_net:
+            try:
+                if ipaddress.ip_address(ip) not in subnet_net:
+                    continue
+            except Exception:
+                continue
+        if ip == router_ip or ip == my_ip:
+            continue
         vendor = oui_lookup(mac)
         devices.append({"ip": ip, "mac": mac, "vendor": vendor, "hostname": ""})
 
-    # 6. Populate Hostnames & Device Names
+    # 5. Populate Hostnames & Device Names
     devices = populate_hostnames(devices)
     devices.sort(key=device_sort_key)
     return devices
 
 
-def merge_devices(existing, new_devices):
+def merge_devices(existing, new_devices, subnet_net=None):
     """
     Merge two device lists, updating existing entries and adding new ones.
-    Retains all previously discovered devices so none are lost on rescan.
+    Optionally enforces subnet filtering so no alien devices cross-pollinate.
     """
-    if not existing:
-        return list(new_devices)
+    if not existing and not new_devices:
+        return []
 
-    merged = {d["mac"].lower(): dict(d) for d in existing if d.get("mac") and d["mac"] not in ("Unknown", "unknown")}
-    by_ip  = {d["ip"]: dict(d) for d in existing if (not d.get("mac") or d["mac"] in ("Unknown", "unknown")) and d.get("ip") and d["ip"] != "-"}
+    def _in_subnet(d):
+        if not subnet_net:
+            return True
+        ip = d.get("ip")
+        if not ip or ip == "-":
+            return True
+        try:
+            return ipaddress.ip_address(ip) in subnet_net
+        except Exception:
+            return False
 
-    for dev in new_devices:
+    clean_existing = [d for d in (existing or []) if _in_subnet(d)]
+    clean_new = [d for d in (new_devices or []) if _in_subnet(d)]
+
+    if not clean_existing:
+        return list(clean_new)
+
+    merged = {d["mac"].lower(): dict(d) for d in clean_existing if d.get("mac") and d["mac"] not in ("Unknown", "unknown")}
+    by_ip  = {d["ip"]: dict(d) for d in clean_existing if (not d.get("mac") or d["mac"] in ("Unknown", "unknown")) and d.get("ip") and d["ip"] != "-"}
+
+    for dev in clean_new:
         mac    = dev.get("mac", "").lower()
         ip     = dev.get("ip", "-")
         vendor = dev.get("vendor", "")
@@ -417,13 +465,17 @@ def resolve_mac(ip, interface=None):
     """
     if not ip or ip in ("-", "Unknown"):
         return ""
+    src_ip = None
+    if interface:
+        src_ip, _ = get_interface_ip_and_mac(interface)
+
     # 1. Native Win32 SendARP
-    mac = win_send_arp(ip)
+    mac = win_send_arp(ip, src_ip=src_ip)
     if mac and mac not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
         return mac
 
     # 2. Windows ARP Cache
-    mac = resolve_mac_from_arp_cache(ip)
+    mac = resolve_mac_from_arp_cache(ip, interface_ip=src_ip)
     if mac:
         return mac
 

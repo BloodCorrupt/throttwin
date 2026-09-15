@@ -20,20 +20,25 @@ except Exception:
     _send_arp_fn = None
 
 
-def win_send_arp(ip):
+def win_send_arp(ip, src_ip=None):
     """
     Direct Windows kernel-level ARP query via iphlpapi.dll -> SendARP.
     Returns lowercase MAC string (e.g. 'aa:bb:cc:dd:ee:ff') or None if unreachable.
     Fast, reliable, works with or without Npcap, and bypasses driver/firewall issues.
+    If src_ip is provided, binds to the specific network adapter.
     """
     if not _send_arp_fn or not ip or ip in ("-", "Unknown", "0.0.0.0"):
         return None
     try:
         dst = socket.inet_aton(ip)
         dst_ulong = ctypes.c_ulong(int.from_bytes(dst, byteorder="little"))
+        src_ulong = ctypes.c_ulong(0)
+        if src_ip and src_ip not in ("-", "Unknown", "0.0.0.0"):
+            src = socket.inet_aton(src_ip)
+            src_ulong = ctypes.c_ulong(int.from_bytes(src, byteorder="little"))
         mac_buf = (ctypes.c_ubyte * 6)()
         mac_len = ctypes.c_ulong(6)
-        res = _send_arp_fn(dst_ulong, 0, ctypes.byref(mac_buf), ctypes.byref(mac_len))
+        res = _send_arp_fn(dst_ulong, src_ulong, ctypes.byref(mac_buf), ctypes.byref(mac_len))
         if res == 0:
             mac_str = ":".join(f"{b:02x}" for b in mac_buf)
             if mac_str not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
@@ -252,13 +257,14 @@ def get_gateways():
     return gateways
 
 
-def resolve_mac_from_arp_cache(ip):
+def resolve_mac_from_arp_cache(ip, interface_ip=None):
     """
     Resolve MAC address for an IP from Windows ARP table.
     Returns MAC string or '' if not found.
     """
     try:
-        result = run(f"arp -a {ip}")
+        cmd = f"arp -a {ip} -N {interface_ip}" if interface_ip else f"arp -a {ip}"
+        result = run(cmd)
         for line in result.stdout.splitlines():
             parts = line.split()
             if len(parts) >= 2 and parts[0] == ip:

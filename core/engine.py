@@ -12,6 +12,7 @@ import threading
 import time
 import logging
 import queue
+import ipaddress
 
 from .network import get_interfaces, get_active_interfaces, get_default_gateway, get_scapy_interface
 from .scanner import arp_scan, merge_devices, device_sort_key
@@ -44,11 +45,12 @@ class InterfaceSession:
 
         self.status = "IDLE"
         self.link_status = "ONLINE"
+        self.operational_mode = "blacklist"
+        self.limit_mbps = 1.0
+
         self.devices = []
         self.targets = []
         self.whitelisted = []
-        self.operational_mode = "blacklist"
-        self.limit_mbps = 1.0
         self.session_start_time = None
 
         self.stop_event = None
@@ -60,6 +62,22 @@ class InterfaceSession:
         self._bg_stop = threading.Event()
         self._bg_thread = threading.Thread(target=self._bg_discovery_worker, daemon=True)
         self._bg_thread.start()
+
+    def get_subnet(self):
+        """Return IPv4Network object for this session's interface."""
+        try:
+            import psutil
+            addrs = psutil.net_if_addrs().get(self.interface, [])
+            ip4 = [(a.address, a.netmask) for a in addrs if a.family.name == "AF_INET"
+                   and not a.address.startswith("169.254") and a.address != "127.0.0.1"]
+            if ip4:
+                my_ip, netmask = ip4[0]
+                return ipaddress.IPv4Network(f"{my_ip}/{netmask}", strict=False)
+            elif self.router_ip and self.router_ip != "0.0.0.0":
+                return ipaddress.IPv4Network(f"{self.router_ip}/24", strict=False)
+        except Exception:
+            pass
+        return None
 
     # ─── Background Discovery ──────────────────────────────────────────────
 
@@ -78,7 +96,7 @@ class InterfaceSession:
                 if fresh:
                     with self.lock:
                         prev_ips = {d.get("ip") for d in self.devices}
-                        self.devices = merge_devices(self.devices, fresh)
+                        self.devices = merge_devices(self.devices, fresh, subnet_net=self.get_subnet())
                         new_devs = [d for d in self.devices if d.get("ip") not in prev_ips]
                         all_devs = list(self.devices)
 
@@ -166,7 +184,7 @@ class InterfaceSession:
         fresh = arp_scan(self.interface, self.router_ip)
         with self.lock:
             prev_count = len(self.devices)
-            self.devices = merge_devices(self.devices, fresh)
+            self.devices = merge_devices(self.devices, fresh, subnet_net=self.get_subnet())
             devices_snap = list(self.devices)
         if len(devices_snap) > prev_count:
             self.engine.broadcast_event("devices_updated", {

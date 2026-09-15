@@ -83,15 +83,19 @@ def get_router_mac(router_ip, interface):
     """
     Resolve the router's MAC address via native Win32 SendARP, ARP cache, or Scapy.
     """
-    from .network import win_send_arp, resolve_mac_from_arp_cache, get_scapy_interface
+    from .network import win_send_arp, resolve_mac_from_arp_cache, get_scapy_interface, get_interface_ip_and_mac
+
+    src_ip = None
+    if interface:
+        src_ip, _ = get_interface_ip_and_mac(interface)
 
     # 1. Native Win32 SendARP
-    mac = win_send_arp(router_ip)
+    mac = win_send_arp(router_ip, src_ip=src_ip)
     if mac and mac not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
         return mac
 
     # 2. Windows ARP Cache
-    mac = resolve_mac_from_arp_cache(router_ip)
+    mac = resolve_mac_from_arp_cache(router_ip, interface_ip=src_ip)
     if mac:
         return mac
 
