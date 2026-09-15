@@ -1,5 +1,6 @@
 import re
 import sys
+import ctypes
 import logging
 import socket
 import subprocess
@@ -11,33 +12,94 @@ from .console import console, questionary, qselect
 
 log = logging.getLogger("throttwin")
 
+# Win32 SendARP API binding
+_send_arp_fn = None
+try:
+    _send_arp_fn = ctypes.windll.iphlpapi.SendARP
+except Exception:
+    _send_arp_fn = None
+
+
+def win_send_arp(ip):
+    """
+    Direct Windows kernel-level ARP query via iphlpapi.dll -> SendARP.
+    Returns lowercase MAC string (e.g. 'aa:bb:cc:dd:ee:ff') or None if unreachable.
+    Fast, reliable, works with or without Npcap, and bypasses driver/firewall issues.
+    """
+    if not _send_arp_fn or not ip or ip in ("-", "Unknown", "0.0.0.0"):
+        return None
+    try:
+        dst = socket.inet_aton(ip)
+        dst_ulong = ctypes.c_ulong(int.from_bytes(dst, byteorder="little"))
+        mac_buf = (ctypes.c_ubyte * 6)()
+        mac_len = ctypes.c_ulong(6)
+        res = _send_arp_fn(dst_ulong, 0, ctypes.byref(mac_buf), ctypes.byref(mac_len))
+        if res == 0:
+            mac_str = ":".join(f"{b:02x}" for b in mac_buf)
+            if mac_str not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+                return mac_str
+    except Exception:
+        pass
+    return None
+
 
 def run(cmd):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+
+def get_interface_ip_and_mac(iface_name):
+    """
+    Get IPv4 and MAC for a given interface name.
+    """
+    addrs = psutil.net_if_addrs().get(iface_name, [])
+    ip = None
+    mac = None
+    for a in addrs:
+        if a.family.name == "AF_INET" and not a.address.startswith("169.254") and a.address != "127.0.0.1":
+            ip = a.address
+        elif a.family.name in ("AF_LINK", "AF_PACKET") and a.address:
+            mac = a.address.lower().replace("-", ":")
+    return ip, mac
 
 
 def get_active_interfaces():
     """
     Return list of active network interfaces with real IPv4 and MAC addresses.
     Filters out loopback, virtual/VPN adapters, and link-local-only interfaces.
+    Prioritizes the interface that has the active default gateway route.
     """
     interfaces = []
     stats = psutil.net_if_stats()
     addrs = psutil.net_if_addrs()
 
+    # Get descriptions from Scapy working ifaces if available
+    desc_map = {}
+    try:
+        from scapy.all import get_working_ifaces
+        for w in get_working_ifaces():
+            desc_map[w.name] = (w.description or "").lower()
+    except Exception:
+        pass
+
     # Prefixes/keywords to skip
-    SKIP_NAMES = [
+    SKIP_KEYWORDS = [
         "loopback", "pseudo", "wan miniport", "bluetooth",
         "tailscale", "openvpn", "wiresock", "tap-windows",
-        "virtual", "direct virtual", "mobile broadband"
+        "virtualbox", "vmware", "hyper-v", "wsl", "vnic",
+        "direct virtual", "mobile broadband"
     ]
+
+    gw_ip = get_default_gateway()
 
     for iface_name, stat in stats.items():
         if not stat.isup or iface_name not in addrs:
             continue
 
         lower_name = iface_name.lower()
-        if any(skip in lower_name for skip in SKIP_NAMES):
+        desc = desc_map.get(iface_name, "")
+        combined = f"{lower_name} {desc}"
+
+        if any(skip in combined for skip in SKIP_KEYWORDS):
             continue
 
         ipv4 = [
@@ -47,10 +109,9 @@ def get_active_interfaces():
             and a.address != "127.0.0.1"
         ]
 
-        import psutil as _psutil
         AF_LINK = None
-        for family in _psutil.net_if_addrs().get(iface_name, []):
-            if family.family.name in ("AF_LINK", "AF_PACKET"):
+        for family in addrs[iface_name]:
+            if family.family.name in ("AF_LINK", "AF_PACKET") and family.address:
                 AF_LINK = family.address
                 break
 
@@ -66,6 +127,17 @@ def get_active_interfaces():
             "mac":  mac_clean,
         })
 
+    # Sort so that the interface matching the default gateway subnet comes first
+    def _iface_priority(item):
+        iface_ip = item["ip"]
+        if gw_ip:
+            # Check if gateway IP starts with same /24 prefix
+            gw_prefix = ".".join(gw_ip.split(".")[:3])
+            if iface_ip.startswith(gw_prefix):
+                return 0
+        return 1
+
+    interfaces.sort(key=_iface_priority)
     return interfaces
 
 
@@ -90,14 +162,12 @@ def get_default_gateway(interface=None):
     """
     try:
         from scapy.all import conf
-        # conf.route.route('0.0.0.0') returns (iface, src_ip, gw_ip)
         route = conf.route.route("0.0.0.0")
         if route and route[2] and route[2] != "0.0.0.0":
             return route[2]
     except Exception:
         pass
 
-    # Fallback: parse `route print` output
     try:
         result = run("route print 0.0.0.0")
         for line in result.stdout.splitlines():
@@ -154,7 +224,7 @@ def resolve_mac_from_arp_cache(ip):
     return ""
 
 
-def resolve_hostname(ip, timeout=0.4):
+def resolve_hostname(ip, timeout=0.25):
     """Lightweight reverse DNS hostname resolution."""
     if not ip or ip == "-":
         return ""

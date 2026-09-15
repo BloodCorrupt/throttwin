@@ -79,14 +79,28 @@ def _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac
 
 
 def get_router_mac(router_ip, interface):
-    """Resolve the router's MAC address via ARP."""
+    """
+    Resolve the router's MAC address via native Win32 SendARP, ARP cache, or Scapy.
+    """
+    from .network import win_send_arp, resolve_mac_from_arp_cache, get_scapy_interface
+
+    # 1. Native Win32 SendARP
+    mac = win_send_arp(router_ip)
+    if mac and mac not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+        return mac
+
+    # 2. Windows ARP Cache
+    mac = resolve_mac_from_arp_cache(router_ip)
+    if mac:
+        return mac
+
+    # 3. Scapy ARP Request
     try:
         from scapy.all import Ether, ARP, srp
-        from .network import get_scapy_interface
         npf_iface = get_scapy_interface(interface)
         ans, _ = srp(
             Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=router_ip),
-            iface=npf_iface, timeout=2, verbose=0, retry=2
+            iface=npf_iface, timeout=1.5, verbose=0, retry=1
         )
         if ans:
             return ans[0][1][Ether].src.lower()
@@ -97,14 +111,15 @@ def get_router_mac(router_ip, interface):
 
 def get_my_mac(interface):
     """Get this machine's MAC address for the given interface."""
+    from .network import get_interface_ip_and_mac
+    _, mac = get_interface_ip_and_mac(interface)
+    if mac:
+        return mac
+
     try:
         from scapy.all import get_if_hwaddr
         from .network import get_scapy_interface
         return get_if_hwaddr(get_scapy_interface(interface)).lower()
     except Exception:
-        import psutil
-        addrs = psutil.net_if_addrs().get(interface, [])
-        for a in addrs:
-            if a.family.name in ("AF_LINK", "AF_PACKET") and a.address:
-                return a.address.lower().replace("-", ":")
+        pass
     return None
