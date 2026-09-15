@@ -912,17 +912,23 @@ class ThrottwinApp {
             tr.dataset.ip = ip;
             tr.dataset.mac = macLower;
 
-            const isGlobalWl = macLower in globalWl;
-            const isGlobalBl = macLower in globalBl;
-            const wlLabel = globalWl[macLower];
+            const isHost = Boolean(dev.is_host);
+            const isGlobalWl = (macLower in globalWl) || isHost;
+            const isGlobalBl = (macLower in globalBl) && !isHost;
+            const wlLabel = isHost ? (globalWl[macLower] || 'This PC') : globalWl[macLower];
             const blLabel = globalBl[macLower];
 
             const isCurrentlyThrottled = runningTargetIps.has(ip);
 
             let isChecked = sess.selectedIps.has(ip);
-            if (!isRunning && !sess.selectedIps.size) {
+            if (sess.mode === "whitelist" && isGlobalWl) {
+                isChecked = true;
+                sess.selectedIps.add(ip);
+            } else if (sess.mode === "blacklist" && isGlobalWl) {
+                isChecked = false;
+                sess.selectedIps.delete(ip);
+            } else if (!isRunning && !sess.selectedIps.size) {
                 if (sess.mode === "blacklist" && isGlobalBl) isChecked = true;
-                if (sess.mode === "whitelist" && isGlobalWl) isChecked = true;
                 if (isChecked) sess.selectedIps.add(ip);
             }
 
@@ -1016,9 +1022,12 @@ class ThrottwinApp {
                 nameHtml = `<div class="device-name-col"><span class="device-vendor-only" title="${dev.vendor || 'Unknown'}">${dev.vendor || 'Unknown'}</span></div>`;
             }
 
+            const isRowDisabled = isRunning || (sess.mode === "whitelist" && isGlobalWl) || (sess.mode === "blacklist" && isGlobalWl);
+            const checkTooltip = isGlobalWl ? 'title="Permanently whitelisted safe device"' : '';
+
             tr.innerHTML = `
                 <td>
-                    <input type="checkbox" class="custom-checkbox device-row-check" data-ip="${ip}" ${isChecked ? 'checked' : ''} ${isRunning ? 'disabled' : ''}>
+                    <input type="checkbox" class="custom-checkbox device-row-check" data-ip="${ip}" ${isChecked ? 'checked' : ''} ${isRowDisabled ? 'disabled' : ''} ${checkTooltip}>
                 </td>
                 <td>${statusToggleHtml}</td>
                 <td class="device-ip">${ip}</td>
@@ -1317,29 +1326,37 @@ class ThrottwinApp {
                 targets = selectedDevices.filter(d => {
                     const mac = (d.mac || '').toLowerCase();
                     const isGw = (d.ip === sess.router_ip);
-                    return !isGw && !globalWlMacs.has(mac);
+                    const isHost = Boolean(d.is_host);
+                    return !isGw && !isHost && !globalWlMacs.has(mac);
                 });
-                whitelisted = sess.devices.filter(d => globalWlMacs.has((d.mac || '').toLowerCase()));
+                whitelisted = sess.devices.filter(d => d.is_host || globalWlMacs.has((d.mac || '').toLowerCase()));
                 if (!targets.length) {
                     this.showToast('Please select at least one device to throttle.', 'error');
                     return;
                 }
             } else {
+                const hostMacs = sess.devices.filter(d => d.is_host).map(d => (d.mac || '').toLowerCase()).filter(Boolean);
+                const hostIps = sess.devices.filter(d => d.is_host).map(d => d.ip).filter(ip => ip && ip !== '-');
                 const safeMacs = new Set([
                     ...globalWlMacs,
+                    ...hostMacs,
                     ...selectedDevices.map(d => (d.mac || '').toLowerCase()).filter(Boolean)
                 ]);
-                const safeIps = new Set(selectedDevices.map(d => d.ip).filter(ip => ip && ip !== '-'));
+                const safeIps = new Set([
+                    ...hostIps,
+                    ...selectedDevices.map(d => d.ip).filter(ip => ip && ip !== '-')
+                ]);
                 if (sess.router_ip) safeIps.add(sess.router_ip);
 
                 whitelisted = sess.devices.filter(d => {
                     const mac = (d.mac || '').toLowerCase();
-                    return (mac && safeMacs.has(mac)) || safeIps.has(d.ip);
+                    return d.is_host || (mac && safeMacs.has(mac)) || safeIps.has(d.ip);
                 });
                 targets = sess.devices.filter(d => {
                     const mac = (d.mac || '').toLowerCase();
                     const isGw = (d.ip === sess.router_ip);
-                    return !isGw && !((mac && safeMacs.has(mac)) || safeIps.has(d.ip));
+                    const isHost = Boolean(d.is_host);
+                    return !isGw && !isHost && !((mac && safeMacs.has(mac)) || safeIps.has(d.ip));
                 });
             }
 

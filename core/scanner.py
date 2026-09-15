@@ -302,10 +302,6 @@ def _get_arp_cache(interface_ip=None, subnet_net=None, router_ip=None, my_mac=No
                         and not ip.startswith("169.254.")
                         and ip != "255.255.255.255"
                         and ip != router_ip
-                        and ip != interface_ip
-                        and ip not in all_host_ips
-                        and mac not in all_host_macs_clean
-                        and (not my_mac_clean or mac != my_mac_clean)
                         and (not router_mac_clean or mac != router_mac_clean)):
                     if subnet_net:
                         try:
@@ -425,6 +421,21 @@ def arp_scan(interface, router_ip, progress_callback=None):
 
     # 5. Populate Hostnames & Device Names
     devices = populate_hostnames(devices)
+
+    # 6. Ensure Host PC itself is explicitly included in discovered devices
+    if my_ip and my_mac:
+        import socket
+        host_hostname = socket.gethostname()
+        host_dev = {
+            "ip": my_ip,
+            "mac": my_mac.lower().replace("-", ":"),
+            "vendor": f"This PC ({interface})",
+            "hostname": host_hostname,
+            "is_host": True
+        }
+        if not any(d.get("ip") == my_ip or (d.get("mac") or "").lower() == host_dev["mac"] for d in devices):
+            devices.append(host_dev)
+
     devices.sort(key=device_sort_key)
     return devices
 
@@ -432,7 +443,7 @@ def arp_scan(interface, router_ip, progress_callback=None):
 def merge_devices(existing, new_devices, subnet_net=None, my_mac=None, my_ip=None, router_ip=None, router_mac=None):
     """
     Merge two device lists, updating existing entries and adding new ones.
-    Strictly prevents duplicate IPs, stale MAC assignments, and excludes self/gateway devices.
+    Strictly prevents duplicate IPs, stale MAC assignments, and preserves Host PC.
     """
     if not existing and not new_devices:
         return []
@@ -450,16 +461,21 @@ def merge_devices(existing, new_devices, subnet_net=None, my_mac=None, my_ip=Non
         ip = d.get("ip")
         mac = (d.get("mac") or "").lower().replace("-", ":")
 
-        if ip in all_host_ips or mac in all_host_macs_clean:
-            return False
-        if my_ip and ip == my_ip:
-            return False
+        # Router gateway is not listed as a regular device
         if router_ip and ip == router_ip:
-            return False
-        if my_mac_clean and mac == my_mac_clean:
             return False
         if router_mac_clean and mac == router_mac_clean:
             return False
+
+        # Host PC device is explicitly kept and tagged
+        if (my_ip and ip == my_ip) or (my_mac_clean and mac == my_mac_clean) or (ip in all_host_ips) or (mac in all_host_macs_clean):
+            d["is_host"] = True
+            if not d.get("hostname"):
+                import socket
+                d["hostname"] = socket.gethostname()
+            if not d.get("vendor") or d.get("vendor") in ("Unknown", "unknown", "-"):
+                d["vendor"] = "This PC (Host)"
+            return True
 
         if subnet_net and ip and ip != "-":
             try:
@@ -522,6 +538,19 @@ def merge_devices(existing, new_devices, subnet_net=None, my_mac=None, my_ip=Non
         if mac and mac not in ("unknown", ""):
             seen_macs.add(mac)
         result.append(d)
+
+    # Ensure Host PC device is present in the final merged list
+    if my_ip and my_mac_clean:
+        has_host = any(d.get("ip") == my_ip or (d.get("mac") or "").lower() == my_mac_clean for d in result)
+        if not has_host:
+            import socket
+            result.append({
+                "ip": my_ip,
+                "mac": my_mac_clean,
+                "vendor": "This PC (Host)",
+                "hostname": socket.gethostname(),
+                "is_host": True
+            })
 
     result.sort(key=device_sort_key)
     return result

@@ -177,14 +177,20 @@ def load_predefined_rules():
         except Exception as e:
             log.warning(f"Failed to load rules: {e}")
 
-    # Automatically ensure all local host adapter MACs are included in the whitelist
+    # Automatically ensure all local host adapter MACs are permanently included in the whitelist
     try:
         from .network import get_all_local_ips_and_macs
+        import socket
         _, all_macs = get_all_local_ips_and_macs()
+        hostname = socket.gethostname()
+        updated = False
         for mac in all_macs:
             mac_clean = mac.lower().replace("-", ":")
             if mac_clean and mac_clean not in rules["whitelist"]:
-                rules["whitelist"][mac_clean] = "Host Machine (This PC)"
+                rules["whitelist"][mac_clean] = f"Host PC ({hostname})"
+                updated = True
+        if updated:
+            save_predefined_rules(rules)
     except Exception:
         pass
 

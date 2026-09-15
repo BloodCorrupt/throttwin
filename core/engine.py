@@ -285,12 +285,30 @@ class InterfaceSession:
             if router_mac:
                 safe_macs.add(router_mac.lower().replace("-", ":"))
 
+            # Ensure host PC device is explicitly in self.whitelisted
+            host_already_wl = any(
+                (dev.get("mac") if isinstance(dev, dict) else "").lower().replace("-", ":") in safe_macs
+                or (dev.get("ip") if isinstance(dev, dict) else dev) in safe_ips
+                for dev in raw_wl
+            )
+            if not host_already_wl and my_ip and my_mac:
+                import socket
+                raw_wl.append({
+                    "ip": my_ip,
+                    "mac": my_mac.lower().replace("-", ":"),
+                    "hostname": socket.gethostname(),
+                    "vendor": f"This PC ({self.interface})",
+                    "is_host": True
+                })
+
             filtered = []
             for tgt in targets:
                 tgt_ip = tgt.get("ip") if isinstance(tgt, dict) else tgt
                 tgt_mac = (tgt.get("mac") if isinstance(tgt, dict) else "").lower().replace("-", ":")
+                is_host = bool(tgt.get("is_host")) if isinstance(tgt, dict) else False
                 if (
                     not tgt_ip
+                    or is_host
                     or tgt_ip in safe_ips
                     or tgt_mac in safe_macs
                     or tgt_ip in all_host_ips
