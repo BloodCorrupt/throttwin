@@ -110,11 +110,15 @@ class TrafficShaper:
         return self.speed_bps / 1_000_000
 
     def _sniffer(self):
-        """Capture packets from the intercepted target on our interface with auto-recovery."""
-        from scapy.all import sniff, IP
+        """Capture both IPv4 and IPv6 packets from the intercepted target on our interface with auto-recovery."""
+        from scapy.all import sniff
         from .network import get_scapy_interface
 
-        bpf = f"ip and (src host {self.target_ip} or dst host {self.target_ip})"
+        # Capture traffic associated with target MAC (both IPv4 and IPv6) or fallback to target IPv4
+        if self.target_mac and self.target_mac not in ("unknown", "Unknown", "-", ""):
+            bpf = f"(ether host {self.target_mac}) and (ip or ip6)"
+        else:
+            bpf = f"src host {self.target_ip} or dst host {self.target_ip}"
 
         while not self.stop_event.is_set():
             try:
@@ -139,11 +143,14 @@ class TrafficShaper:
             pass  # Drop when queue full (congestion control)
 
     def _forwarder(self):
-        """Dequeue packets, apply token-bucket limit, then forward with auto-recovery."""
+        """Dequeue packets, apply token-bucket limit, then forward with dual-stack IPv4/IPv6 support."""
         try:
             from scapy.all import Ether, IP, sendp
+            from scapy.layers.inet6 import IPv6
             from .network import get_scapy_interface
             npf_iface = get_scapy_interface(self.interface)
+
+            target_mac_lower = (self.target_mac or "").lower()
 
             while not self.stop_event.is_set():
                 try:
@@ -153,29 +160,26 @@ class TrafficShaper:
 
                 pkt_len = len(pkt)
 
-                # Token bucket: drop if over limit
+                # Token bucket: drop if over limit (meters both IPv4 and IPv6 traffic)
                 if not self.bucket.consume(pkt_len):
                     continue  # Packet dropped — enforcing rate limit
 
                 self.total_bytes += pkt_len
 
-                # Rewrite MACs for forwarding:
-                # Packets FROM target → send to router
-                # Packets TO target   → send to target
+                # Rewrite MACs for forwarding (dual-stack IPv4 and IPv6):
+                # Packets FROM target → send to router MAC
+                # Packets TO target   → send to target MAC
                 try:
+                    pkt_src_mac = pkt[Ether].src.lower() if Ether in pkt else ""
                     if IP in pkt:
-                        if pkt[IP].src == self.target_ip:
-                            # Forward upstream to router
-                            fwd = (
-                                Ether(src=self.my_mac, dst=self.router_mac) /
-                                pkt[IP]
-                            )
-                        else:
-                            # Forward downstream to target
-                            fwd = (
-                                Ether(src=self.my_mac, dst=self.target_mac) /
-                                pkt[IP]
-                            )
+                        is_upstream = (pkt[IP].src == self.target_ip) or (target_mac_lower and pkt_src_mac == target_mac_lower)
+                        dst_mac = self.router_mac if is_upstream else self.target_mac
+                        fwd = Ether(src=self.my_mac, dst=dst_mac) / pkt[IP]
+                        sendp(fwd, iface=npf_iface, verbose=0)
+                    elif IPv6 in pkt:
+                        is_upstream = bool(target_mac_lower and pkt_src_mac == target_mac_lower)
+                        dst_mac = self.router_mac if is_upstream else self.target_mac
+                        fwd = Ether(src=self.my_mac, dst=dst_mac) / pkt[IPv6]
                         sendp(fwd, iface=npf_iface, verbose=0)
                 except Exception as e:
                     log.debug(f"Forward error (interface reconnecting?): {e}")
@@ -187,14 +191,18 @@ class TrafficShaper:
 
 def enable_ip_forwarding():
     """
-    Enable IP forwarding on Windows via registry + netsh.
+    Enable dual-stack IPv4 and IPv6 forwarding on Windows via registry + netsh.
     Required so that intercepted packets can be forwarded.
     """
     try:
         import subprocess
-        # Enable IP routing via netsh
+        # Enable IPv4 & IPv6 routing via netsh
         subprocess.run(
             "netsh int ipv4 set global forwarding=enabled",
+            shell=True, capture_output=True
+        )
+        subprocess.run(
+            "netsh int ipv6 set global forwarding=enabled",
             shell=True, capture_output=True
         )
         # Also set via registry for persistence across reboots
@@ -203,13 +211,18 @@ def enable_ip_forwarding():
             r'/v IPEnableRouter /t REG_DWORD /d 1 /f',
             shell=True, capture_output=True
         )
-        log.info("IP forwarding enabled.")
+        subprocess.run(
+            r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" '
+            r'/v IPEnableRouter /t REG_DWORD /d 1 /f',
+            shell=True, capture_output=True
+        )
+        log.info("Dual-stack IPv4/IPv6 forwarding enabled.")
     except Exception as e:
         log.warning(f"Could not enable IP forwarding: {e}")
 
 
 def disable_ip_forwarding():
-    """Disable IP forwarding after session ends."""
+    """Disable dual-stack IP forwarding after session ends."""
     try:
         import subprocess
         subprocess.run(
@@ -217,11 +230,20 @@ def disable_ip_forwarding():
             shell=True, capture_output=True
         )
         subprocess.run(
+            "netsh int ipv6 set global forwarding=disabled",
+            shell=True, capture_output=True
+        )
+        subprocess.run(
             r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" '
             r'/v IPEnableRouter /t REG_DWORD /d 0 /f',
             shell=True, capture_output=True
         )
-        log.info("IP forwarding disabled.")
+        subprocess.run(
+            r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" '
+            r'/v IPEnableRouter /t REG_DWORD /d 0 /f',
+            shell=True, capture_output=True
+        )
+        log.info("Dual-stack IPv4/IPv6 forwarding disabled.")
     except Exception as e:
         log.warning(f"Could not disable IP forwarding: {e}")
 

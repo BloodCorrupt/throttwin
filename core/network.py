@@ -67,6 +67,22 @@ def get_interface_ip_and_mac(iface_name):
     return ip, mac
 
 
+def get_interface_ipv6_link_local(iface_name):
+    """
+    Return link-local IPv6 address (fe80::...) for the given interface.
+    """
+    try:
+        addrs = psutil.net_if_addrs().get(iface_name, [])
+        for a in addrs:
+            if "INET6" in a.family.name and a.address:
+                clean = a.address.split("%")[0].lower()
+                if clean.startswith("fe80:"):
+                    return clean
+    except Exception:
+        pass
+    return "fe80::1"
+
+
 def _parse_route_table():
     """
     Parse the Windows routing table and return a list of
