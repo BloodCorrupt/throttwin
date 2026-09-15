@@ -2,7 +2,7 @@ from .console import console, Table, Live, Rule, Panel, Group, box, qselect, cus
 from .checks import check_all, check_os, check_admin, check_npcap, check_dependencies
 from .network import (
     get_active_interfaces, get_interfaces, get_default_gateway,
-    pick_interface, pick_router, resolve_hostname, get_scapy_interface
+    pick_interface, pick_interfaces, pick_router, resolve_hostname, get_scapy_interface
 )
 from .scanner import (
     arp_scan, merge_devices, device_sort_key,
@@ -13,7 +13,7 @@ from .shaping import (
     enable_ip_forwarding, disable_ip_forwarding,
     setup_traffic_shaping, add_target_shaping, cleanup_traffic_shaping
 )
-from .monitor import live_monitor, verify_spoofing, format_bytes, format_duration
+from .monitor import live_monitor, multi_live_monitor, verify_spoofing, format_bytes, format_duration
 from .config import (
     save_config, load_config, clear_saved_config,
     match_saved_config, match_saved_whitelist,
@@ -33,7 +33,7 @@ __all__ = [
     "check_all", "check_os", "check_admin", "check_npcap", "check_dependencies",
     # network
     "get_active_interfaces", "get_interfaces", "get_default_gateway",
-    "pick_interface", "pick_router", "resolve_hostname", "get_scapy_interface",
+    "pick_interface", "pick_interfaces", "pick_router", "resolve_hostname", "get_scapy_interface",
     # scanner
     "arp_scan", "merge_devices", "device_sort_key",
     "scan_devices", "display_devices", "pick_limit",
@@ -44,7 +44,7 @@ __all__ = [
     "enable_ip_forwarding", "disable_ip_forwarding",
     "setup_traffic_shaping", "add_target_shaping", "cleanup_traffic_shaping",
     # monitor
-    "live_monitor", "verify_spoofing", "format_bytes", "format_duration",
+    "live_monitor", "multi_live_monitor", "verify_spoofing", "format_bytes", "format_duration",
     # config
     "save_config", "load_config", "clear_saved_config",
     "match_saved_config", "match_saved_whitelist",

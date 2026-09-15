@@ -1,4 +1,14 @@
+import sys
 import questionary
+
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 from rich.console import Console, Group
 from rich.theme import Theme
@@ -25,7 +35,7 @@ theme = Theme({
     "label":    "bold cyan",
 })
 
-console = Console(theme=theme)
+console = Console(theme=theme, legacy_windows=False)
 
 
 def qselect(message, choices, **kwargs):

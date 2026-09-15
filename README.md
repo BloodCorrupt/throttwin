@@ -56,13 +56,13 @@ run.bat
 
 Throttwin guides you through:
 
-1. Selecting your network interface (auto-detected if only one)
-2. Selecting your gateway/router (auto-detected)
-3. Choosing operational mode (Blacklist or Whitelist)
-4. Picking target devices from a scanned list
-5. Choosing a bandwidth limit
-6. Confirming the session review
-7. Live bandwidth monitor while session is running
+1. Selecting your network interface(s) — select one or multiple adapters simultaneously (e.g. Ethernet + Wi-Fi)
+2. Selecting or auto-detecting your gateway/router per interface
+3. Choosing operational mode (Blacklist or Whitelist) for each session
+4. Picking target devices from a scanned list per subnet
+5. Choosing bandwidth limits
+6. Grand multi-session review
+7. Unified live multi-interface bandwidth monitor while sessions are running
 
 ### Web UI Dashboard
 

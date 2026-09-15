@@ -349,7 +349,7 @@ def arp_scan(interface, router_ip, progress_callback=None):
                     if progress_callback:
                         progress_callback(r[0], r[1])
     except Exception as e:
-        log.warning(f"Win32 SendARP sweep exception: {e}")
+        log.debug(f"Win32 SendARP sweep exception: {e}")
 
     # 4. Harvest Windows Kernel ARP Cache
     cache_devs = _get_arp_cache(router_ip)

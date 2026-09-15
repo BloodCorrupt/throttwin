@@ -261,13 +261,57 @@ def resolve_hostname(ip, timeout=0.25):
     return ""
 
 
+from .console import console, questionary, qselect, custom_style
+
+
 def get_interfaces():
     """Return list of friendly interface name strings."""
     return [i["name"] for i in get_active_interfaces()]
 
 
+def pick_interfaces():
+    """
+    Interactive multi-interface picker. Auto-selects if only one found.
+    Allows selecting multiple interfaces (e.g. Ethernet + Wi-Fi) with checkboxes.
+    Returns list of interface info dicts: [{"name": "...", "ip": "...", "mac": "...", "gateway": "..."}, ...]
+    """
+    interfaces = get_active_interfaces()
+
+    if not interfaces:
+        console.print(" [error]No active network interfaces found.[/error]")
+        sys.exit(1)
+
+    console.print(f" [success]Found {len(interfaces)} active interface(s)[/success]")
+
+    if len(interfaces) == 1:
+        iface = interfaces[0]
+        console.print(f" [text]Auto-selected interface: {iface['name']} ({iface['ip']})[/text]")
+        return [iface]
+
+    choices = []
+    for iface in interfaces:
+        gw_str = f"gw: {iface.get('gateway') or '-'}"
+        display = f"{iface['name']:<20} {iface['ip']:<15} {gw_str:<18} {iface['mac']}"
+        choices.append(questionary.Choice(title=display, value=iface, checked=True))
+
+    selected = questionary.checkbox(
+        "Select network interface(s) to manage:",
+        qmark="",
+        instruction="(Space=toggle, Enter=confirm)",
+        choices=choices,
+        style=custom_style
+    ).ask(kbi_msg="")
+
+    if not selected:
+        console.print(" [error]No interfaces selected. Exiting.[/error]")
+        sys.exit(0)
+
+    console.print(f" [text]Selected {len(selected)} interface(s): {', '.join(i['name'] for i in selected)}[/text]\n")
+    return selected
+
+
 def pick_interface():
-    """Interactive interface picker. Auto-selects if only one found."""
+    """Interactive single interface picker. Auto-selects if only one found."""
     interfaces = get_active_interfaces()
 
     if not interfaces:
@@ -297,11 +341,14 @@ def pick_interface():
 
 
 def pick_router(interface):
-    """Interactive gateway picker. Auto-selects if only one found."""
-    gateways = get_gateways()
+    """Auto-detects gateway for the interface or prompts user if not found."""
+    detected = get_default_gateway(interface)
+    if detected:
+        return detected
 
+    gateways = get_gateways()
     if not gateways:
-        console.print(" [error]No gateway detected. Make sure you're connected to a network.[/error]")
+        console.print(f" [error]No gateway detected for {interface}. Make sure you're connected to a network.[/error]")
         sys.exit(1)
 
     if len(gateways) == 1:
@@ -313,7 +360,7 @@ def pick_router(interface):
     for gw in gateways:
         choices.append(questionary.Choice(title=gw["ip"], value=gw["ip"]))
 
-    selected = qselect("Select gateway router:", choices=choices)
+    selected = qselect(f"Select gateway router for {interface}:", choices=choices)
     if selected is None:
         console.print(" [error]Cancelled by user.[/error]")
         sys.exit(0)

@@ -159,6 +159,128 @@ def live_monitor(interface, targets, shapers, limit_mbps, stop_event,
     console.print(" [success]Network restored and traffic shaping cleared.[/success]")
 
 
+def multi_live_monitor(sessions, stop_event, session_start_time=None):
+    """
+    Rich Live terminal monitor displaying multi-interface simultaneous sessions.
+    Shows per-interface target tables, individual telemetry, and aggregate bandwidth.
+    """
+    start_time = session_start_time or time.monotonic()
+
+    def _build_display():
+        now = time.monotonic()
+        uptime = now - start_time
+        up_str = format_duration(uptime)
+
+        total_mbps = 0.0
+        total_bytes = 0
+        total_targets = 0
+
+        # Colors for different interfaces
+        IFACE_COLORS = ["cyan", "green", "magenta", "yellow", "blue"]
+
+        tables = []
+        for idx, sess in enumerate(sessions):
+            color = IFACE_COLORS[idx % len(IFACE_COLORS)]
+            iface_name = getattr(sess, "interface", f"Interface {idx+1}")
+            router_ip = getattr(sess, "router_ip", "-")
+            mode = getattr(sess, "operational_mode", "blacklist").capitalize()
+            limit_mbps = getattr(sess, "limit_mbps", 1.0)
+            shapers = getattr(sess, "shapers", {})
+            targets = getattr(sess, "targets", [])
+
+            sess_mbps = sum(s.get_speed_mbps() for s in shapers.values())
+            sess_bytes = sum(s.total_bytes for s in shapers.values())
+
+            total_mbps += sess_mbps
+            total_bytes += sess_bytes
+            total_targets += len(targets)
+
+            table = Table(
+                box=box.SIMPLE,
+                show_header=True,
+                expand=True,
+                border_style="dim"
+            )
+            table.add_column("IP Address", style="bold white", min_width=15)
+            table.add_column("Device", style="dim", min_width=20)
+            table.add_column("Speed", style="cyan", min_width=12, justify="right")
+            table.add_column("Limit", style="dim", min_width=10, justify="right")
+            table.add_column("Total", style="dim", min_width=10, justify="right")
+            table.add_column("Status", style="", min_width=12)
+
+            if not targets:
+                table.add_row(
+                    "-",
+                    "[dim]No active targets (Whitelist radar active)[/dim]",
+                    "0.00 Mbps",
+                    f"{limit_mbps:.1f} Mbps",
+                    "0 B",
+                    "[dim]○ Probing[/dim]"
+                )
+            else:
+                for tgt in list(targets):
+                    ip = tgt.get("ip") if isinstance(tgt, dict) else tgt
+                    vendor = tgt.get("vendor", "Unknown") if isinstance(tgt, dict) else "Unknown"
+                    host = tgt.get("hostname", "") if isinstance(tgt, dict) else ""
+                    name = f"{host} ({vendor})" if host else vendor
+                    if len(name) > 24:
+                        name = name[:24] + "…"
+
+                    shaper = shapers.get(ip)
+                    speed_mbps = shaper.get_speed_mbps() if shaper else 0.0
+                    total_b = shaper.total_bytes if shaper else 0
+
+                    bar_pct = min(speed_mbps / limit_mbps, 1.0) if limit_mbps > 0 else 0
+                    if bar_pct > 0.75:
+                        status_str = "[red]● HEAVY[/red]"
+                    elif bar_pct > 0.1:
+                        status_str = "[yellow]● ACTIVE[/yellow]"
+                    else:
+                        status_str = "[dim]○ Idle[/dim]"
+
+                    table.add_row(
+                        ip or "-",
+                        name,
+                        f"{speed_mbps:.2f} Mbps",
+                        f"{limit_mbps:.1f} Mbps",
+                        format_bytes(total_b),
+                        status_str
+                    )
+
+            panel_title = f"[{color}]● {iface_name}[/{color}] [dim]({router_ip}) · Mode: {mode} · Limit: {limit_mbps:.1f} Mbps · Subtotal: {sess_mbps:.2f} Mbps ({format_bytes(sess_bytes)})[/dim]"
+            tables.append(Panel(table, title=panel_title, border_style=color))
+
+        footer = (
+            f"[bold cyan]Total Speed:[/bold cyan] {total_mbps:.2f} Mbps  "
+            f"[dim]|[/dim]  "
+            f"[bold cyan]Transferred:[/bold cyan] {format_bytes(total_bytes)}  "
+            f"[dim]|[/dim]  "
+            f"[bold cyan]Targets:[/bold cyan] {total_targets}  "
+            f"[dim]|[/dim]  "
+            f"[bold cyan]Interfaces:[/bold cyan] {len(sessions)}  "
+            f"[dim]|[/dim]  "
+            f"[bold cyan]Uptime:[/bold cyan] {up_str}  "
+            f"[dim]|[/dim]  "
+            f"[dim]Ctrl+C to stop all[/dim]"
+        )
+
+        from rich.console import Group
+        return Panel(
+            Group(*tables),
+            title="[bold white]Throttwin — Multi-Interface Live Monitor[/bold white]",
+            subtitle=footer,
+            border_style="bright_blue"
+        )
+
+    with Live(_build_display(), refresh_per_second=2, console=console) as live:
+        while not stop_event.is_set():
+            try:
+                live.update(_build_display())
+                stop_event.wait(0.5)
+            except Exception:
+                break
+
+
 def _whitelist_watcher(interface, router_ip, targets, whitelist_devices,
                        on_new_device, stop_event):
     """
@@ -198,3 +320,4 @@ def _whitelist_watcher(interface, router_ip, targets, whitelist_devices,
                 known_ips.add(ip)
         except Exception as e:
             log.warning(f"Whitelist watcher error: {e}")
+

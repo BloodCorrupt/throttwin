@@ -15,23 +15,24 @@ import logging
 import threading
 import time
 
-from core.console import console
+from core.console import console, Table, box, Panel
 from pyfiglet import figlet_format
 
 from core import (
     check_os, check_admin, check_npcap, check_dependencies,
-    pick_interface, pick_router,
+    pick_interface, pick_interfaces, pick_router,
     scan_devices, display_devices, pick_limit,
     enable_ip_forwarding, disable_ip_forwarding,
     setup_traffic_shaping, cleanup_traffic_shaping, add_target_shaping,
     arp_spoof_loop, get_router_mac, get_my_mac,
-    verify_spoofing, live_monitor,
+    verify_spoofing, live_monitor, multi_live_monitor,
     save_config, load_config, clear_saved_config,
     ask_user_action, prompt_operational_mode,
     prompt_blacklist_selection, prompt_whitelist_selection,
     prompt_session_review, match_saved_config, match_saved_whitelist,
     prompt_manage_rules, prompt_manual_device,
     device_sort_key, get_predefined_whitelist,
+    ThrottwinEngine,
 )
 
 logging.basicConfig(
@@ -56,31 +57,18 @@ def signal_handler(sig, frame):
     stop_event.set()
 
 
-def main():
-    check_os()
-    check_admin()
-    check_npcap()
-    check_dependencies()
+def configure_session_for_interface(iface_info, session_index=1, total_sessions=1):
+    """Interactive wizard to configure session parameters for ONE network adapter."""
+    interface = iface_info["name"]
+    router_ip = iface_info.get("gateway") or pick_router(interface)
 
-    banner()
+    if total_sessions > 1:
+        console.rule(f"[bold cyan]Configuring Session {session_index}/{total_sessions}: {interface} ({iface_info['ip']} → {router_ip})[/bold cyan]")
 
-    interface       = None
-    router_ip       = None
-    limit_mbps      = None
-    used_saved      = False
-    targets_to_throttle = []
-    safe_devices    = []
-    safe_ips        = set()
-    safe_macs       = set()
-    operational_mode = "blacklist"
-
-    interface = pick_interface()
-    router_ip = pick_router(interface)
-
-    config  = load_config()
+    config = load_config(interface)
     devices = scan_devices(interface, router_ip)
 
-    has_saved  = bool(config and config.get("interface") == interface and config.get("router_ip") == router_ip)
+    has_saved = bool(config and config.get("interface") == interface and config.get("router_ip") == router_ip)
     saved_mode = config.get("operational_mode", "blacklist") if has_saved else None
 
     if has_saved and saved_mode == "whitelist":
@@ -95,7 +83,7 @@ def main():
         matched_whitelisted = None
         matched_dev         = None
         last_ips            = []
-        console.print(" [dim]No previous session found on this network.[/dim]\n")
+        console.print(f" [dim]No previous session found on {interface}.[/dim]\n")
 
     display_devices(
         config if has_saved else None,
@@ -113,7 +101,7 @@ def main():
                 mac = dev.get("mac", "").lower()
                 existing_idx = None
                 for idx, d in enumerate(devices):
-                    if (mac and mac != "unknown" and d.get("mac","").lower() == mac) \
+                    if (mac and mac != "unknown" and d.get("mac", "").lower() == mac) \
                             or (dev.get("ip") and d.get("ip") == dev["ip"]):
                         existing_idx = idx
                         break
@@ -139,14 +127,14 @@ def main():
             continue
 
         elif action == "clear_cache":
-            clear_saved_config()
+            clear_saved_config(interface)
             config = None
             has_saved = False
             matched_dev = None
             matched_whitelisted = None
             last_ips = []
             console.clear()
-            console.print(" [success]Saved session and cache cleared.[/success]\n")
+            console.print(f" [success]Saved session and cache cleared for {interface}.[/success]\n")
             devices = scan_devices(interface, router_ip)
             display_devices(None, None, devices, last_ips=[])
             continue
@@ -155,7 +143,7 @@ def main():
             console.clear()
             console.print()
             devices = scan_devices(interface, router_ip, existing_devices=devices,
-                                   status_msg="Rescanning network, please wait...")
+                                   status_msg=f"Rescanning {interface}, please wait...")
             if has_saved:
                 if saved_mode == "whitelist":
                     matched_whitelisted = match_saved_whitelist(config, devices)
@@ -177,6 +165,7 @@ def main():
             break
 
     # ── Mode & target selection ───────────────────────────────
+    used_saved = False
     if action == "use_saved":
         limit_mbps       = config["limit_mbps"]
         operational_mode = config.get("operational_mode", "blacklist")
@@ -190,6 +179,7 @@ def main():
                 if not ((d.get("mac") and d["mac"].lower() in safe_macs) or d.get("ip") in safe_ips)
             ]
         else:
+            safe_devices = []
             targets_to_throttle = matched_dev or []
         used_saved = True
 
@@ -198,6 +188,7 @@ def main():
 
     if not used_saved:
         if operational_mode in ("blacklist", None):
+            safe_devices = []
             targets_to_throttle = prompt_blacklist_selection(devices, matched_dev, interface=interface)
         elif operational_mode == "whitelist":
             safe_devices = prompt_whitelist_selection(devices, matched_whitelisted, interface=interface)
@@ -208,138 +199,109 @@ def main():
                 if not ((d.get("mac") and d["mac"].lower() in safe_macs) or d.get("ip") in safe_ips)
             ]
             if not targets_to_throttle:
-                console.print(" [info]All current devices whitelisted. New devices will be throttled automatically.[/info]")
+                console.print(f" [info]All current devices on {interface} whitelisted. New devices will be throttled automatically.[/info]")
 
         limit_mbps = pick_limit()
 
-    if not used_saved:
+    if total_sessions == 1 and not used_saved:
         prompt_session_review(interface, router_ip, operational_mode, limit_mbps, targets_to_throttle)
+
+    return {
+        "interface": interface,
+        "router_ip": router_ip,
+        "operational_mode": operational_mode,
+        "targets": targets_to_throttle,
+        "safe_devices": safe_devices,
+        "limit_mbps": limit_mbps,
+        "devices": devices,
+        "used_saved": used_saved,
+    }
+
+
+def main():
+    check_os()
+    check_admin()
+    check_npcap()
+    check_dependencies()
+
+    banner()
+
+    # Multi-interface picker
+    selected_interfaces = pick_interfaces()
+    total_sessions = len(selected_interfaces)
+
+    configured_sessions = []
+    for idx, iface_info in enumerate(selected_interfaces, 1):
+        sess_cfg = configure_session_for_interface(iface_info, session_index=idx, total_sessions=total_sessions)
+        configured_sessions.append(sess_cfg)
+
+    # Multi-session review table when multiple interfaces selected
+    if total_sessions > 1:
+        console.print()
+        table = Table(box=box.ROUNDED, title="[bold white]Multi-Interface Session Review[/bold white]")
+        table.add_column("Interface", style="bold cyan")
+        table.add_column("Gateway", style="white")
+        table.add_column("Mode", style="yellow")
+        table.add_column("Targets / Safe", style="green")
+        table.add_column("Limit", style="bold magenta")
+        for cs in configured_sessions:
+            if cs["operational_mode"] == "blacklist":
+                tgt_str = f"{len(cs['targets'])} target(s)"
+            else:
+                tgt_str = f"{len(cs['safe_devices'])} safe (auto-trap)"
+            table.add_row(
+                cs["interface"],
+                cs["router_ip"],
+                cs["operational_mode"].title(),
+                tgt_str,
+                f"{cs['limit_mbps']:.1f} Mbps"
+            )
+        console.print(table)
+        console.print()
+        try:
+            yn = input("  Proceed to launch all sessions? (y/n): ").strip().lower()
+            if yn != "y":
+                console.print(" [error]Cancelled by user.[/error]")
+                sys.exit(0)
+        except KeyboardInterrupt:
+            sys.exit(0)
+
+    # Launch sessions via ThrottwinEngine
+    engine = ThrottwinEngine()
+    active_sessions = []
+
+    with console.status("Starting session(s)...", spinner="dots"):
+        for cs in configured_sessions:
+            session, _ = engine.create_session(cs["interface"], cs["router_ip"])
+            ok, msg = session.start_session(
+                mode=cs["operational_mode"],
+                targets=cs["targets"],
+                limit_mbps=cs["limit_mbps"],
+                whitelisted=cs["safe_devices"] if cs["operational_mode"] == "whitelist" else None
+            )
+            if ok:
+                active_sessions.append(session)
+            else:
+                console.print(f" [error]Failed to start session on {cs['interface']}: {msg}[/error]")
+
+    if not active_sessions:
+        console.print(" [error]No sessions could be started.[/error]")
+        sys.exit(1)
+
+    console.print(f" [success]Started {len(active_sessions)} session(s) successfully![/success]")
+    time.sleep(1)
 
     signal.signal(signal.SIGINT,  signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # ── Resolve MACs ──────────────────────────────────────────
-    with console.status("Resolving router MAC and local MAC...", spinner="dots"):
-        router_mac = get_router_mac(router_ip, interface)
-        my_mac     = get_my_mac(interface)
-
-    if not router_mac:
-        console.print(f" [error]Could not resolve router MAC for {router_ip}. Check your interface and gateway.[/error]")
-        sys.exit(1)
-    if not my_mac:
-        console.print(" [error]Could not determine local MAC address.[/error]")
-        sys.exit(1)
-
-    spoof_threads = []
-    shapers       = {}
-
-    def on_new_device(dev):
-        """Called by whitelist watcher when a new unwhitelisted device appears."""
-        dev_mac = dev.get("mac", "").lower()
-        dev_ip  = dev.get("ip")
-        predefined_wl = set(get_predefined_whitelist().keys())
-        if operational_mode == "whitelist":
-            if (dev_mac and (dev_mac in safe_macs or dev_mac in predefined_wl)) or \
-               (dev_ip and dev_ip in safe_ips):
-                return None
-
-        shaper = add_target_shaping(
-            interface, dev_ip, dev_mac, router_ip, router_mac,
-            my_mac, limit_mbps, stop_event
-        )
-        shapers[dev_ip] = shaper
-
-        t = threading.Thread(
-            target=arp_spoof_loop,
-            args=(interface, dev_ip, dev_mac, router_ip, router_mac, my_mac, stop_event),
-            daemon=True
-        )
-        t.start()
-        spoof_threads.append(t)
-        targets_to_throttle.append(dev)
-        return dev_ip
-
     try:
-        with console.status("Starting session...", spinner="dots"):
-            save_config(interface, router_ip, operational_mode, targets_to_throttle, limit_mbps,
-                        whitelisted=safe_devices if operational_mode == "whitelist" else None)
-
-            enable_ip_forwarding()
-
-            shapers = setup_traffic_shaping(
-                interface, targets_to_throttle, limit_mbps,
-                router_ip, router_mac, my_mac, stop_event
-            )
-
-            for tgt in targets_to_throttle:
-                tgt_ip  = tgt.get("ip")  if isinstance(tgt, dict) else tgt
-                tgt_mac = tgt.get("mac") if isinstance(tgt, dict) else ""
-                if tgt_ip and tgt_ip != "-":
-                    t = threading.Thread(
-                        target=arp_spoof_loop,
-                        args=(interface, tgt_ip, tgt_mac, router_ip, router_mac, my_mac, stop_event),
-                        daemon=True
-                    )
-                    t.start()
-                    spoof_threads.append(t)
-
-            # Verify spoofing if we have targets
-            if targets_to_throttle:
-                first_ip = targets_to_throttle[0].get("ip") if isinstance(targets_to_throttle[0], dict) \
-                           else targets_to_throttle[0]
-                success = verify_spoofing(interface, first_ip, shapers, stop_event)
-            else:
-                success = True
-
-        if success:
-            if targets_to_throttle:
-                console.print(" [success]ARP spoofing active — launching live monitor...[/success]")
-            else:
-                console.print(" [success]Whitelist mode active — monitoring for new devices...[/success]")
-            time.sleep(1)
-
-            monitor_thread = threading.Thread(
-                target=live_monitor,
-                args=(interface, targets_to_throttle, shapers, limit_mbps, stop_event),
-                kwargs={
-                    "router_ip":         router_ip,
-                    "whitelist_devices": safe_devices if operational_mode == "whitelist" else None,
-                    "on_new_device":     on_new_device if operational_mode == "whitelist" else None,
-                    "session_start_time": time.monotonic(),
-                },
-                daemon=True
-            )
-            monitor_thread.start()
-        else:
-            console.print(" [warning]Target device not seen yet — may not be active on the network.[/warning]")
-            console.print(" [dim]Running anyway. Press Ctrl+C to stop.[/dim]")
-
-            monitor_thread = threading.Thread(
-                target=live_monitor,
-                args=(interface, targets_to_throttle, shapers, limit_mbps, stop_event),
-                kwargs={"session_start_time": time.monotonic()},
-                daemon=True
-            )
-            monitor_thread.start()
-
-        try:
-            while not stop_event.is_set():
-                stop_event.wait(0.2)
-        except KeyboardInterrupt:
-            stop_event.set()
-
-        if "monitor_thread" in dir():
-            monitor_thread.join(timeout=2)
-
+        multi_live_monitor(active_sessions, stop_event, session_start_time=time.monotonic())
     finally:
-        with console.status("Stopping session and restoring network...", spinner="dots"):
-            for t in spoof_threads:
-                t.join(timeout=4)
-            cleanup_traffic_shaping(shapers)
-            disable_ip_forwarding()
-
-        console.print("\n [error]Session terminated.[/error]")
-        console.print(" [success]Network restored and traffic rules cleared.[/success]")
+        with console.status("Stopping all sessions and restoring network...", spinner="dots"):
+            for s in active_sessions:
+                s.stop_session()
+        console.print("\n [error]Session(s) terminated.[/error]")
+        console.print(" [success]Network restored and traffic shaping cleared.[/success]")
 
 
 def run_web_ui(host="0.0.0.0", port=5000):
