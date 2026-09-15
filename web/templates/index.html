@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Throttwin — Windows Bandwidth Limiter</title>
+    <meta name="description" content="Throttwin: Per-device bandwidth limiter via ARP spoofing for Windows with Npcap.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="app-layout">
+
+    <!-- ─── Sidebar ─────────────────────────────────────── -->
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="brand-icon">
+                <i class="fa-solid fa-bolt-lightning"></i>
+            </div>
+            <div class="brand-text">
+                <h1>THROTTWIN <span class="brand-win">WIN</span></h1>
+                <span>Windows Edition</span>
+            </div>
+        </div>
+
+        <nav class="nav-menu">
+            <button class="nav-item active" data-tab="dashboard" id="navDashboard">
+                <i class="fa-solid fa-gauge-high"></i>
+                <span>Live Dashboard</span>
+            </button>
+            <button class="nav-item" data-tab="devices" id="navDevices">
+                <i class="fa-solid fa-network-wired"></i>
+                <span>Network Scanner</span>
+            </button>
+            <button class="nav-item" data-tab="rules" id="navRules">
+                <i class="fa-solid fa-shield-halved"></i>
+                <span>Global Rules</span>
+            </button>
+            <button class="nav-item" data-tab="settings" id="navSettings">
+                <i class="fa-solid fa-sliders"></i>
+                <span>Configuration</span>
+            </button>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="connection-status" id="liveConnectionBadge">
+                <span class="status-dot"></span>
+                <span class="status-text">Connecting…</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ─── Main ─────────────────────────────────────────── -->
+    <main class="main-content">
+
+        <!-- Top Bar -->
+        <header class="topbar">
+            <div class="session-badge-wrapper">
+                <div class="session-status-pill idle" id="sessionStatusPill">
+                    <span class="pulse-indicator"></span>
+                    <span id="sessionStatusText">IDLE</span>
+                </div>
+                <div class="session-timer" id="sessionTimer" style="display:none">
+                    <i class="fa-regular fa-clock"></i>
+                    <span id="sessionTimeDisplay">00:00:00</span>
+                </div>
+            </div>
+            <div class="topbar-actions">
+                <button class="btn btn-secondary btn-sm" id="btnRescanTop" title="Rescan network">
+                    <i class="fa-solid fa-arrows-rotate"></i>
+                    <span>Scan</span>
+                </button>
+                <button class="btn btn-secondary btn-sm" id="btnManualAddTop" title="Add device manually">
+                    <i class="fa-solid fa-plus"></i>
+                    <span>Add Device</span>
+                </button>
+                <button class="btn btn-primary btn-glow" id="btnSessionControl">
+                    <i class="fa-solid fa-play"></i>
+                    <span id="btnSessionControlText">Start Session</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- ══ DASHBOARD ══════════════════════════════════ -->
+        <section class="tab-pane active" id="pane-dashboard">
+
+            <!-- Metric Cards -->
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <span class="metric-title">Live Throughput</span>
+                        <i class="fa-solid fa-chart-line metric-icon cyan"></i>
+                    </div>
+                    <div class="metric-value" id="statThroughput">0.0 <span class="unit">KB/s</span></div>
+                    <div class="metric-subtitle" id="statThroughputMbps">0.00 Mbps total speed</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <span class="metric-title">Data Throttled</span>
+                        <i class="fa-solid fa-database metric-icon purple"></i>
+                    </div>
+                    <div class="metric-value" id="statDataThrottled">0.0 <span class="unit">MB</span></div>
+                    <div class="metric-subtitle">Total intercepted data</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <span class="metric-title">Active Targets</span>
+                        <i class="fa-solid fa-crosshairs metric-icon red"></i>
+                    </div>
+                    <div class="metric-value" id="statTargets">0</div>
+                    <div class="metric-subtitle">Devices being limited</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <span class="metric-title">Bandwidth Limit</span>
+                        <i class="fa-solid fa-gauge metric-icon orange"></i>
+                    </div>
+                    <div class="metric-value" id="statLimit">—</div>
+                    <div class="metric-subtitle">Current cap per device</div>
+                </div>
+            </div>
+
+            <!-- Live Targets Table -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">
+                        <i class="fa-solid fa-crosshairs"></i>
+                        Active Throttle Targets
+                    </div>
+                    <div class="live-badge" id="liveIndicator" style="display:none">
+                        <span class="live-dot"></span>LIVE
+                    </div>
+                </div>
+                <div class="card-body">
+                    <table class="data-table" id="targetsTable">
+                        <thead>
+                            <tr>
+                                <th>IP Address</th>
+                                <th>Device</th>
+                                <th>Speed</th>
+                                <th>Limit</th>
+                                <th>Total</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="targetsTableBody">
+                            <tr class="empty-row">
+                                <td colspan="7">
+                                    <i class="fa-solid fa-moon"></i>
+                                    No active session — start one from the toolbar above
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Speed sparkline bar -->
+            <div class="card" id="speedChartCard" style="display:none">
+                <div class="card-header">
+                    <div class="card-title">
+                        <i class="fa-solid fa-wave-square"></i>
+                        Throughput History
+                    </div>
+                </div>
+                <div class="card-body">
+                    <canvas id="speedChart" height="80"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══ DEVICES ════════════════════════════════════ -->
+        <section class="tab-pane" id="pane-devices">
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">
+                        <i class="fa-solid fa-network-wired"></i>
+                        Network Scanner
+                    </div>
+                    <div class="card-actions">
+                        <button class="btn btn-secondary btn-sm" id="btnRescanDevices">
+                            <i class="fa-solid fa-arrows-rotate"></i> Rescan
+                        </button>
+                        <button class="btn btn-secondary btn-sm" id="btnClearCache">
+                            <i class="fa-solid fa-trash"></i> Clear Cache
+                        </button>
+                        <button class="btn btn-secondary btn-sm" id="btnManualAdd">
+                            <i class="fa-solid fa-plus"></i> Add Manual
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p class="scan-hint" id="scanHint">
+                        <i class="fa-solid fa-circle-info"></i>
+                        Click <strong>Rescan</strong> to discover devices on your network.
+                    </p>
+                    <table class="data-table" id="devicesTable">
+                        <thead>
+                            <tr>
+                                <th><input type="checkbox" id="selectAllDevices" title="Select all"></th>
+                                <th>IP Address</th>
+                                <th>MAC Address</th>
+                                <th>Vendor / Device</th>
+                                <th>Hostname</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="devicesTableBody">
+                            <tr class="empty-row">
+                                <td colspan="7">
+                                    <i class="fa-solid fa-radar"></i>
+                                    No devices discovered yet
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="bulk-actions" id="bulkActions" style="display:none">
+                        <span id="selectedCount">0 selected</span>
+                        <button class="btn btn-danger btn-sm" id="btnThrottleSelected">
+                            <i class="fa-solid fa-bolt"></i> Throttle Selected
+                        </button>
+                        <button class="btn btn-secondary btn-sm" id="btnWhitelistSelected">
+                            <i class="fa-solid fa-shield"></i> Whitelist Selected
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══ RULES ══════════════════════════════════════ -->
+        <section class="tab-pane" id="pane-rules">
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">
+                        <i class="fa-solid fa-shield-halved"></i>
+                        Global Rules (by MAC address)
+                    </div>
+                    <div class="card-actions">
+                        <button class="btn btn-secondary btn-sm" id="btnAddRule">
+                            <i class="fa-solid fa-plus"></i> Add Rule
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p class="scan-hint">
+                        <i class="fa-solid fa-circle-info"></i>
+                        Whitelist rules permanently protect a device. Blacklist rules are always throttled.
+                    </p>
+                    <table class="data-table" id="rulesTable">
+                        <thead>
+                            <tr>
+                                <th>Type</th>
+                                <th>MAC Address</th>
+                                <th>Label</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rulesTableBody">
+                            <tr class="empty-row">
+                                <td colspan="4">
+                                    <i class="fa-solid fa-shield"></i>
+                                    No global rules defined
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══ SETTINGS ═══════════════════════════════════ -->
+        <section class="tab-pane" id="pane-settings">
+            <div class="settings-grid">
+                <!-- Network Config -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <i class="fa-solid fa-network-wired"></i>
+                            Network Configuration
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-group">
+                            <label class="form-label">Network Interface</label>
+                            <select class="form-select" id="settingInterface">
+                                <option value="">Loading…</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Router / Gateway IP</label>
+                            <input type="text" class="form-input" id="settingRouter" placeholder="e.g. 192.168.1.1">
+                        </div>
+                        <button class="btn btn-primary" id="btnSaveNetworkSettings">
+                            <i class="fa-solid fa-floppy-disk"></i> Save
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Session Config -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <i class="fa-solid fa-bolt"></i>
+                            Session Settings
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-group">
+                            <label class="form-label">Operational Mode</label>
+                            <select class="form-select" id="settingMode">
+                                <option value="blacklist">Blacklist — throttle selected devices</option>
+                                <option value="whitelist">Whitelist — throttle all except safe list</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Bandwidth Limit (Mbps)</label>
+                            <div class="limit-input-row">
+                                <input type="number" class="form-input" id="settingLimit" value="1.0" min="0.1" max="100" step="0.1">
+                                <button class="btn btn-secondary btn-sm" id="btnApplyLimit">
+                                    <i class="fa-solid fa-check"></i> Apply Live
+                                </button>
+                            </div>
+                            <div class="limit-presets">
+                                <button class="preset-btn" data-val="0.5">0.5</button>
+                                <button class="preset-btn" data-val="1">1</button>
+                                <button class="preset-btn" data-val="2">2</button>
+                                <button class="preset-btn" data-val="3">3</button>
+                                <button class="preset-btn" data-val="5">5</button>
+                                <button class="preset-btn" data-val="10">10</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- About card -->
+                <div class="card about-card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <i class="fa-solid fa-circle-info"></i>
+                            About Throttwin
+                        </div>
+                    </div>
+                    <div class="card-body about-body">
+                        <div class="about-logo">
+                            <i class="fa-solid fa-bolt-lightning"></i>
+                            <span>Throttwin</span>
+                        </div>
+                        <p>Windows-native per-device bandwidth limiter using ARP spoofing and Scapy with Npcap.</p>
+                        <div class="about-tech">
+                            <span class="tech-badge"><i class="fa-brands fa-python"></i> Python</span>
+                            <span class="tech-badge"><i class="fa-solid fa-layer-group"></i> Scapy</span>
+                            <span class="tech-badge"><i class="fa-solid fa-ethernet"></i> Npcap</span>
+                            <span class="tech-badge"><i class="fa-solid fa-flask"></i> Flask</span>
+                        </div>
+                        <p class="disclaimer">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            For use only on networks you own or have explicit permission to manage.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+</div>
+
+<!-- ─── Modals ─────────────────────────────────────────── -->
+
+<!-- Start Session Modal -->
+<div class="modal-overlay" id="modalStartSession">
+    <div class="modal">
+        <div class="modal-header">
+            <h2><i class="fa-solid fa-play"></i> Start Session</h2>
+            <button class="modal-close" id="closeModalStart">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">Interface</label>
+                <select class="form-select" id="modalInterface"></select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Router IP</label>
+                <input type="text" class="form-input" id="modalRouter" placeholder="192.168.1.1">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Mode</label>
+                <select class="form-select" id="modalMode">
+                    <option value="blacklist">Blacklist — throttle specific devices</option>
+                    <option value="whitelist">Whitelist — throttle all except safe list</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Bandwidth Limit (Mbps)</label>
+                <input type="number" class="form-input" id="modalLimit" value="1.0" min="0.1" step="0.1">
+                <div class="limit-presets" style="margin-top:8px">
+                    <button class="preset-btn modal-preset" data-val="0.5">0.5</button>
+                    <button class="preset-btn modal-preset" data-val="1">1</button>
+                    <button class="preset-btn modal-preset" data-val="2">2</button>
+                    <button class="preset-btn modal-preset" data-val="3">3</button>
+                    <button class="preset-btn modal-preset" data-val="5">5</button>
+                </div>
+            </div>
+            <div class="form-group" id="targetSelectGroup">
+                <label class="form-label">Select Targets to Throttle</label>
+                <div class="target-list" id="modalTargetList">
+                    <p class="no-devices-msg">Scan the network first to see devices.</p>
+                </div>
+            </div>
+            <div class="form-group" id="whitelistSelectGroup" style="display:none">
+                <label class="form-label">Select Safe Devices (Whitelist)</label>
+                <div class="target-list" id="modalWhitelistList">
+                    <p class="no-devices-msg">Scan the network first to see devices.</p>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" id="cancelModalStart">Cancel</button>
+            <button class="btn btn-primary btn-glow" id="confirmStartSession">
+                <i class="fa-solid fa-play"></i> Start Session
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Add Device Modal -->
+<div class="modal-overlay" id="modalAddDevice">
+    <div class="modal modal-sm">
+        <div class="modal-header">
+            <h2><i class="fa-solid fa-plus"></i> Add Device Manually</h2>
+            <button class="modal-close" id="closeModalAddDevice">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">IP Address</label>
+                <input type="text" class="form-input" id="manualIP" placeholder="e.g. 192.168.1.50">
+            </div>
+            <div class="form-group">
+                <label class="form-label">MAC Address</label>
+                <input type="text" class="form-input" id="manualMAC" placeholder="e.g. aa:bb:cc:dd:ee:ff">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Label / Vendor (optional)</label>
+                <input type="text" class="form-input" id="manualVendor" placeholder="e.g. My Phone">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" id="cancelAddDevice">Cancel</button>
+            <button class="btn btn-primary" id="confirmAddDevice">
+                <i class="fa-solid fa-plus"></i> Add Device
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Add Rule Modal -->
+<div class="modal-overlay" id="modalAddRule">
+    <div class="modal modal-sm">
+        <div class="modal-header">
+            <h2><i class="fa-solid fa-shield-halved"></i> Add Global Rule</h2>
+            <button class="modal-close" id="closeModalAddRule">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">Rule Type</label>
+                <select class="form-select" id="ruleCategory">
+                    <option value="whitelist">Whitelist — always protect</option>
+                    <option value="blacklist">Blacklist — always throttle</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">MAC Address</label>
+                <input type="text" class="form-input" id="ruleMAC" placeholder="aa:bb:cc:dd:ee:ff">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Label (optional)</label>
+                <input type="text" class="form-input" id="ruleName" placeholder="e.g. My Router">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" id="cancelAddRule">Cancel</button>
+            <button class="btn btn-primary" id="confirmAddRule">
+                <i class="fa-solid fa-plus"></i> Save Rule
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast notifications -->
+<div id="toastContainer"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

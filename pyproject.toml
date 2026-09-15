@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "throttwin"
+version = "1.0.0"
+description = "Per-device bandwidth limiter via ARP spoofing for Windows"
+requires-python = ">=3.9"
+dependencies = [
+    "scapy>=2.5.0",
+    "rich>=13.0.0",
+    "questionary>=2.0.0",
+    "psutil>=5.9.0",
+    "pyfiglet>=1.0.2",
+    "Flask>=3.0.0",
+]
+
+[project.scripts]
+throttwin = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "web*"]
