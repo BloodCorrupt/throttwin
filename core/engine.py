@@ -14,7 +14,10 @@ import logging
 import queue
 import ipaddress
 
-from .network import get_interfaces, get_active_interfaces, get_default_gateway, get_scapy_interface
+from .network import (
+    get_interfaces, get_active_interfaces, get_default_gateway, get_scapy_interface,
+    get_interface_ip_and_mac, resolve_mac_from_arp_cache
+)
 from .scanner import arp_scan, merge_devices, device_sort_key
 from .spoof import arp_spoof_loop, get_router_mac, get_my_mac
 from .shaping import (
@@ -93,12 +96,18 @@ class InterfaceSession:
                 continue
             try:
                 fresh = arp_scan(self.interface, self.router_ip)
-                if fresh:
-                    with self.lock:
-                        prev_ips = {d.get("ip") for d in self.devices}
-                        self.devices = merge_devices(self.devices, fresh, subnet_net=self.get_subnet())
-                        new_devs = [d for d in self.devices if d.get("ip") not in prev_ips]
-                        all_devs = list(self.devices)
+                my_ip, my_mac = get_interface_ip_and_mac(self.interface)
+                router_mac = resolve_mac_from_arp_cache(self.router_ip, interface_ip=my_ip)
+                with self.lock:
+                    prev_ips = {d.get("ip") for d in self.devices}
+                    self.devices = merge_devices(
+                        self.devices, fresh,
+                        subnet_net=self.get_subnet(),
+                        my_mac=my_mac, my_ip=my_ip,
+                        router_ip=self.router_ip, router_mac=router_mac
+                    )
+                    new_devs = [d for d in self.devices if d.get("ip") not in prev_ips]
+                    all_devs = list(self.devices)
 
                     if new_devs:
                         self.engine.broadcast_event("devices_discovered", {
@@ -182,9 +191,16 @@ class InterfaceSession:
         if not self.interface or not self.router_ip:
             return self.devices
         fresh = arp_scan(self.interface, self.router_ip)
+        my_ip, my_mac = get_interface_ip_and_mac(self.interface)
+        router_mac = resolve_mac_from_arp_cache(self.router_ip, interface_ip=my_ip)
         with self.lock:
             prev_count = len(self.devices)
-            self.devices = merge_devices(self.devices, fresh, subnet_net=self.get_subnet())
+            self.devices = merge_devices(
+                self.devices, fresh,
+                subnet_net=self.get_subnet(),
+                my_mac=my_mac, my_ip=my_ip,
+                router_ip=self.router_ip, router_mac=router_mac
+            )
             devices_snap = list(self.devices)
         if len(devices_snap) > prev_count:
             self.engine.broadcast_event("devices_updated", {
@@ -458,11 +474,16 @@ class InterfaceSession:
                 log.warning(f"[{self.session_id}] Whitelist watcher scan error: {e}")
                 continue
 
-            with self.lock:
-                self.devices = merge_devices(self.devices, found)
+            my_ip, my_mac = get_interface_ip_and_mac(self.interface)
+            router_mac = resolve_mac_from_arp_cache(self.router_ip, interface_ip=my_ip) or get_router_mac(self.router_ip, self.interface)
 
-            router_mac = get_router_mac(self.router_ip, self.interface)
-            my_mac = get_my_mac(self.interface)
+            with self.lock:
+                self.devices = merge_devices(
+                    self.devices, found,
+                    subnet_net=self.get_subnet(),
+                    my_mac=my_mac, my_ip=my_ip,
+                    router_ip=self.router_ip, router_mac=router_mac
+                )
 
             for dev in found:
                 if self.stop_event and self.stop_event.is_set():

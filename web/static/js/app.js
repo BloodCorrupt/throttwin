@@ -791,7 +791,22 @@ class ThrottwinApp {
 
         const sess = this.getActiveSession();
 
-        if (!sess.devices.length) {
+        // Defensive deduplication by IP and MAC
+        const seenIps = new Set();
+        const seenMacs = new Set();
+        const uniqueDevices = [];
+        (sess.devices || []).forEach(d => {
+            if (!d) return;
+            const ip = d.ip;
+            const mac = (d.mac || '').toLowerCase();
+            if (ip && ip !== '-' && seenIps.has(ip)) return;
+            if (mac && mac !== 'unknown' && mac !== '' && seenMacs.has(mac)) return;
+            if (ip && ip !== '-') seenIps.add(ip);
+            if (mac && mac !== 'unknown' && mac !== '') seenMacs.add(mac);
+            uniqueDevices.push(d);
+        });
+
+        if (!uniqueDevices.length) {
             tbody.innerHTML = `
                 <tr>
                     <td colspan="8" class="empty-state">
@@ -817,7 +832,7 @@ class ThrottwinApp {
         const isRunning = sess.status === "RUNNING";
         tbody.innerHTML = '';
 
-        sess.devices.forEach(dev => {
+        uniqueDevices.forEach(dev => {
             const tr = document.createElement('tr');
             const macLower = (dev.mac || '').toLowerCase();
             const ip = dev.ip || '-';
@@ -968,6 +983,17 @@ class ThrottwinApp {
 
             tbody.appendChild(tr);
         });
+
+        // Sync header select all checkbox state
+        const selectAllCb = document.getElementById('selectAllCheckbox');
+        if (selectAllCb) {
+            const selectable = uniqueDevices.filter(d => d.ip && d.ip !== '-');
+            const totalSelectable = selectable.length;
+            const totalChecked = selectable.filter(d => sess.selectedIps.has(d.ip)).length;
+            selectAllCb.checked = totalSelectable > 0 && totalChecked === totalSelectable;
+            selectAllCb.indeterminate = totalChecked > 0 && totalChecked < totalSelectable;
+            selectAllCb.disabled = isRunning;
+        }
     }
 
     async hotToggleTarget(ip, shouldThrottle) {
@@ -1002,20 +1028,35 @@ class ThrottwinApp {
         const sess = this.getActiveSession();
         const subnet = sess.router_ip ? sess.router_ip.split('.').slice(0, 3).join('.') + '.x' : (sess.interface || '—');
 
+        // Defensive deduplication
+        const seenIps = new Set();
+        const seenMacs = new Set();
+        const uniqueDevices = [];
+        (sess.devices || []).forEach(d => {
+            if (!d) return;
+            const ip = d.ip;
+            const mac = (d.mac || '').toLowerCase();
+            if (ip && ip !== '-' && seenIps.has(ip)) return;
+            if (mac && mac !== 'unknown' && mac !== '' && seenMacs.has(mac)) return;
+            if (ip && ip !== '-') seenIps.add(ip);
+            if (mac && mac !== 'unknown' && mac !== '') seenMacs.add(mac);
+            uniqueDevices.push(d);
+        });
+
         if (titleText) {
             titleText.innerHTML = `Discovered Network Devices &mdash; <span style="color: var(--accent-cyan); font-family: var(--font-mono); font-weight: 600;">${sess.session_id}</span> <span style="font-size: 0.8rem; color: var(--text-muted); font-family: var(--font-mono);">(${subnet})</span>`;
         }
         if (statusText) {
-            statusText.textContent = `[${sess.session_id}] ${sess.devices.length} device(s) online on subnet ${subnet}.`;
+            statusText.textContent = `[${sess.session_id}] ${uniqueDevices.length} device(s) online on subnet ${subnet}.`;
         }
 
-        if (!sess.devices.length) {
+        if (!uniqueDevices.length) {
             tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><p>No devices discovered yet for ${sess.session_id}. Click "Rescan Network" above.</p></td></tr>`;
             return;
         }
 
         tbody.innerHTML = '';
-        sess.devices.forEach(dev => {
+        uniqueDevices.forEach(dev => {
             const tr = document.createElement('tr');
             let nameHtml = '';
             if (dev.hostname) {
