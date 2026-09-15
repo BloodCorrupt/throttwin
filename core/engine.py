@@ -16,7 +16,7 @@ import ipaddress
 
 from .network import (
     get_interfaces, get_active_interfaces, get_default_gateway, get_scapy_interface,
-    get_interface_ip_and_mac, resolve_mac_from_arp_cache, get_all_local_ips_and_macs
+    get_interface_ip_and_mac, resolve_mac_from_arp_cache, get_all_local_ips_and_macs, win_send_arp
 )
 from .scanner import arp_scan, merge_devices, device_sort_key
 from .spoof import arp_spoof_loop, get_router_mac, get_my_mac
@@ -341,6 +341,9 @@ class InterfaceSession:
                 self.status = "IDLE"
                 return False, "Could not determine local MAC address."
 
+            if my_ip and self.router_ip:
+                win_send_arp(self.router_ip, src_ip=my_ip)
+
             self.shapers = setup_traffic_shaping(
                 self.interface, self.targets, self.limit_mbps,
                 self.router_ip, router_mac, my_mac, self.stop_event
@@ -485,6 +488,10 @@ class InterfaceSession:
 
         cleanup_traffic_shaping(self.shapers)
 
+        my_ip, _ = get_interface_ip_and_mac(self.interface)
+        if my_ip and self.router_ip:
+            win_send_arp(self.router_ip, src_ip=my_ip)
+
         # Only disable IP forwarding if no other sessions are running
         any_running = any(
             s.status == "RUNNING" and s.session_id != self.session_id
@@ -525,6 +532,8 @@ class InterfaceSession:
 
             all_host_ips, all_host_macs = get_all_local_ips_and_macs()
             my_ip, my_mac = get_interface_ip_and_mac(self.interface)
+            if my_ip and self.router_ip:
+                win_send_arp(self.router_ip, src_ip=my_ip)
             router_mac = resolve_mac_from_arp_cache(self.router_ip, interface_ip=my_ip) or get_router_mac(self.router_ip, self.interface)
 
             safe_macs = {

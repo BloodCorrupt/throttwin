@@ -16,6 +16,12 @@ import threading
 import logging
 import queue
 
+try:
+    from scapy.all import conf
+    conf.sniff_promisc = False
+except Exception:
+    pass
+
 log = logging.getLogger("throttwin")
 
 # We track per-IP shapers keyed by target IP
@@ -158,6 +164,7 @@ class TrafficShaper:
                     filter=bpf,
                     prn=self._on_packet,
                     store=False,
+                    promisc=False,
                     stop_filter=lambda _: self.stop_event.is_set(),
                 )
             except Exception as e:
@@ -274,63 +281,18 @@ class TrafficShaper:
 
 def enable_ip_forwarding():
     """
-    Enable IPv4 forwarding on Windows via registry + netsh.
-    Preserves IPv6 host mode (enabling IPv6 forwarding on Windows turns it into a router,
-    which disables RA processing and drops the default IPv6 route and DNS).
+    Preserve host network stack stability and avoid disruptive netsh resets.
+    Packet interception and forwarding is performed entirely in userspace by
+    TrafficShaper._forwarder via Scapy sendp(), preserving rate limiting.
+    We deliberately avoid calling disruptive 'netsh int ... set global forwarding'
+    which resets active TCP sockets on Windows and breaks DNS.
     """
-    try:
-        import subprocess
-        # Enable IPv4 routing via netsh
-        subprocess.run(
-            "netsh int ipv4 set global forwarding=enabled",
-            shell=True, capture_output=True
-        )
-        # Explicitly ensure IPv6 remains in host mode so default gateway (::/0) and DNS work
-        subprocess.run(
-            "netsh int ipv6 set global forwarding=disabled",
-            shell=True, capture_output=True
-        )
-        # Set IPv4 forwarding in registry for persistence
-        subprocess.run(
-            r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" '
-            r'/v IPEnableRouter /t REG_DWORD /d 1 /f',
-            shell=True, capture_output=True
-        )
-        subprocess.run(
-            r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" '
-            r'/v IPEnableRouter /t REG_DWORD /d 0 /f',
-            shell=True, capture_output=True
-        )
-        log.info("IPv4 forwarding enabled (IPv6 client mode preserved).")
-    except Exception as e:
-        log.warning(f"Could not configure IP forwarding: {e}")
+    log.info("Host TCP/IP stack preserved in client mode (userspace Scapy forwarding active).")
 
 
 def disable_ip_forwarding():
-    """Disable IP forwarding after session ends."""
-    try:
-        import subprocess
-        subprocess.run(
-            "netsh int ipv4 set global forwarding=disabled",
-            shell=True, capture_output=True
-        )
-        subprocess.run(
-            "netsh int ipv6 set global forwarding=disabled",
-            shell=True, capture_output=True
-        )
-        subprocess.run(
-            r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" '
-            r'/v IPEnableRouter /t REG_DWORD /d 0 /f',
-            shell=True, capture_output=True
-        )
-        subprocess.run(
-            r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" '
-            r'/v IPEnableRouter /t REG_DWORD /d 0 /f',
-            shell=True, capture_output=True
-        )
-        log.info("IP forwarding disabled.")
-    except Exception as e:
-        log.warning(f"Could not disable IP forwarding: {e}")
+    """Clean up after session ends."""
+    pass
 
 
 def setup_traffic_shaping(interface, targets, limit_mbps, router_ip,
