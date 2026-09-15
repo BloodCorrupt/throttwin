@@ -169,11 +169,11 @@ Total: 0.94 Mbps  |  Transferred: 4.2 MB  |  Uptime: 00:04:12  |  Ctrl+C to stop
 
 ## Saved Sessions
 
-Throttwin saves your last session to `~/.throttwin/config.json`. On next launch, if the same network and targets are detected, you can resume the saved session without re-configuring.
+Throttwin saves your last session to `config/config.json`. On next launch, if the same network and targets are detected, you can resume the saved session without re-configuring.
 
 ## Global Rules
 
-Persistent per-MAC rules are stored in `~/.throttwin/rules.json`:
+Persistent per-MAC rules are stored in `config/rules.json`:
 - **Whitelist rules** — device is never throttled, even in whitelist mode
 - **Blacklist rules** — device is always throttled in any future session
 
@@ -187,3 +187,8 @@ Persistent per-MAC rules are stored in `~/.throttwin/rules.json`:
 ## Disclaimer
 
 This tool is intended for use **only on networks you own or have explicit permission to manage**. Do not use it on networks you do not control.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+

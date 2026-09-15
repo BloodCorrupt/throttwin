@@ -1,11 +1,13 @@
 [build-system]
 requires = ["setuptools>=61.0.0"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "throttwin"
-version = "1.0.0"
-description = "Per-device bandwidth limiter via ARP spoofing for Windows"
+version = "2.0.0"
+description = "A Windows tool to limit the bandwidth of any device on your local network, no router access required."
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.9"
 dependencies = [
     "scapy>=2.5.0",
@@ -22,3 +24,8 @@ throttwin = "main:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["core*", "web*"]
+
+[tool.setuptools.package-data]
+core = ["oui_db.json"]
+web = ["templates/*", "static/**/*"]
+
