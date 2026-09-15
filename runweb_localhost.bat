@@ -9,7 +9,7 @@ REM  --> Check for permissions
 
 REM --> If error flag set, we do not have admin.
 if '%errorlevel%' NEQ '0' (
-    echo Requesting administrative privileges for Throttwin Web UI (Localhost Only)...
+    echo Requesting administrative privileges for Throttwin Localhost Web UI...
     goto UACPrompt
 ) else ( goto gotAdmin )
 
