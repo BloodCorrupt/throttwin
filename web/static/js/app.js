@@ -35,7 +35,13 @@ class ThrottwinApp {
         await this.fetchStatus();
         this.initSSE();
         this.startLocalTimer();
+
+        // Auto-trigger background scan on load if device cache is empty
+        if (!this.state.devices || this.state.devices.length === 0) {
+            this.triggerScan();
+        }
     }
+
 
     /* ==========================================================
        1. SERVER-SENT EVENTS (SSE) STREAMING
@@ -844,7 +850,26 @@ class ThrottwinApp {
     async triggerScan() {
         if (this.isScanning) return;
         this.isScanning = true;
-        this.showToast('Scanning local network for devices...', 'info');
+
+        const btnTop = document.getElementById('btnRescanTop');
+        const btnTab = document.getElementById('btnScanDevicesTab');
+        const statusBanner = document.getElementById('scannerStatusBanner');
+        const statusText = document.getElementById('scannerStatusText');
+
+        if (btnTop) {
+            btnTop.disabled = true;
+            btnTop.innerHTML = '<i class="fa-solid fa-arrows-rotate fa-spin"></i> <span>Scanning...</span>';
+        }
+        if (btnTab) {
+            btnTab.disabled = true;
+            btnTab.innerHTML = '<i class="fa-solid fa-arrows-rotate fa-spin"></i> Rescanning...';
+        }
+        if (statusBanner && statusText) {
+            statusBanner.className = 'scanner-status-banner scanning';
+            statusText.textContent = 'Active Win32 SendARP sweep in progress...';
+        }
+
+        this.showToast('Scanning network (native Win32 SendARP)...', 'info');
 
         try {
             const res = await fetch('/api/scan', {
@@ -860,16 +885,29 @@ class ThrottwinApp {
                 this.state.devices = data.devices;
                 this.renderDashboardTable();
                 this.renderScannerTable();
-                this.showToast(`Scan complete: found ${data.count} device(s).`, 'success');
+                this.showToast(`Scan complete: found ${data.count} active device(s).`, 'success');
+                if (statusBanner && statusText) {
+                    statusBanner.className = 'scanner-status-banner';
+                    statusText.textContent = `Network inventory updated: ${data.count} device(s) online.`;
+                }
             } else {
-                this.showToast('Scan failed.', 'error');
+                this.showToast('Scan failed: ' + (data.error || 'Unknown error'), 'error');
             }
         } catch (e) {
             this.showToast('Network error during scan.', 'error');
         } finally {
             this.isScanning = false;
+            if (btnTop) {
+                btnTop.disabled = false;
+                btnTop.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> <span>Scan</span>';
+            }
+            if (btnTab) {
+                btnTab.disabled = false;
+                btnTab.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Rescan Network';
+            }
         }
     }
+
 
     async submitManualDevice() {
         const ip = document.getElementById('manualDeviceIp').value.trim();

@@ -126,9 +126,14 @@ class ThrottwinEngine:
                     self.status = "IDLE"
 
     def _bg_discovery_worker(self):
+        # Initial fast scan after 1s startup
+        first_run = True
         while not self._bg_stop.is_set():
-            if self._bg_stop.wait(15):
+            delay = 1.0 if first_run else 8.0
+            if self._bg_stop.wait(delay):
                 break
+            first_run = False
+
             if not self.current_interface or not self.current_router_ip:
                 continue
             try:
@@ -138,13 +143,20 @@ class ThrottwinEngine:
                         prev_ips = {d.get("ip") for d in self.devices}
                         self.devices = merge_devices(self.devices, fresh)
                         new_devs = [d for d in self.devices if d.get("ip") not in prev_ips]
+                        all_devs = list(self.devices)
+
                     if new_devs:
                         self.broadcast_event("devices_discovered", {
                             "new_devices": new_devs,
-                            "all_devices": list(self.devices)
+                            "all_devices": all_devs
                         })
-            except Exception:
-                pass
+                    elif first_run or len(all_devs) > len(prev_ips):
+                        self.broadcast_event("devices_updated", {
+                            "devices": all_devs
+                        })
+            except Exception as e:
+                log.debug(f"Background discovery error: {e}")
+
 
     def get_interfaces(self):
         return get_interfaces()

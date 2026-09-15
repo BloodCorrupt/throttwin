@@ -1,3 +1,5 @@
+import os
+import json
 import re
 import sys
 import logging
@@ -23,108 +25,15 @@ log = logging.getLogger("throttwin")
 _HOSTNAME_CACHE = {}
 _VENDOR_OUI_CACHE = {}
 
-# Built-in high-accuracy OUI Vendor Database (top 150+ manufacturers & IoT chipsets)
-_COMMON_OUIS = {
-    # Apple
-    "00:03:93": "Apple", "00:05:02": "Apple", "00:0a:27": "Apple", "00:0a:95": "Apple",
-    "00:0d:93": "Apple", "00:10:fa": "Apple", "00:11:24": "Apple", "00:14:51": "Apple",
-    "00:16:cb": "Apple", "00:17:f2": "Apple", "00:19:e3": "Apple", "00:1b:63": "Apple",
-    "00:1c:b3": "Apple", "00:1d:4f": "Apple", "00:1e:52": "Apple", "00:1e:c2": "Apple",
-    "00:1f:5b": "Apple", "00:1f:f3": "Apple", "00:21:e9": "Apple", "00:22:41": "Apple",
-    "00:23:12": "Apple", "00:23:32": "Apple", "00:23:6c": "Apple", "00:23:df": "Apple",
-    "00:24:36": "Apple", "00:25:00": "Apple", "00:25:4b": "Apple", "00:25:bc": "Apple",
-    "00:26:08": "Apple", "00:26:4a": "Apple", "00:26:b0": "Apple", "00:26:bb": "Apple",
-    "18:65:90": "Apple", "20:c9:d0": "Apple", "28:cf:e9": "Apple", "34:36:3b": "Apple",
-    "3c:07:54": "Apple", "3c:15:c2": "Apple", "40:6c:8f": "Apple", "40:b4:cd": "Apple",
-    "48:d7:05": "Apple", "50:bc:96": "Apple", "58:55:ca": "Apple", "60:03:08": "Apple",
-    "60:30:d4": "Apple", "60:f4:45": "Apple", "64:20:0c": "Apple", "68:5b:35": "Apple",
-    "70:3e:ac": "Apple", "70:ec:e4": "Apple", "78:4f:43": "Apple", "7c:6d:62": "Apple",
-    "80:e6:50": "Apple", "84:78:8b": "Apple", "88:66:a5": "Apple", "8c:85:90": "Apple",
-    "90:72:40": "Apple", "90:0f:0c": "Apple", "98:01:a7": "Apple", "98:5a:eb": "Apple",
-    "9c:20:7b": "Apple", "a4:83:e7": "Apple", "a8:5b:78": "Apple", "ac:bc:32": "Apple",
-    "b8:78:26": "Apple", "bc:fe:d9": "Apple", "c8:6f:1d": "Apple", "cc:08:8d": "Apple",
-    "d0:23:db": "Apple", "d4:9a:20": "Apple", "dc:2b:2a": "Apple", "e0:c7:67": "Apple",
-    "f0:18:98": "Apple", "f4:5c:89": "Apple", "f8:27:93": "Apple", "fc:25:3f": "Apple",
-    
-    # Samsung
-    "00:07:ab": "Samsung", "00:12:47": "Samsung", "00:15:99": "Samsung", "00:16:32": "Samsung",
-    "00:17:c9": "Samsung", "00:1a:8a": "Samsung", "00:1e:e1": "Samsung", "00:21:19": "Samsung",
-    "04:d3:b0": "Samsung", "10:51:07": "Samsung", "24:4b:03": "Samsung", "28:9e:97": "Samsung",
-    "30:07:4d": "Samsung", "34:be:00": "Samsung", "38:0b:40": "Samsung", "40:4e:36": "Samsung",
-    "48:44:f7": "Samsung", "50:85:69": "Samsung", "5c:0a:5b": "Samsung", "68:05:71": "Samsung",
-    "78:40:e4": "Samsung", "84:25:19": "Samsung", "90:f1:aa": "Samsung", "94:63:72": "Samsung",
-    "a8:06:00": "Samsung", "ac:5f:3e": "Samsung", "bc:72:b9": "Samsung", "c4:73:1e": "Samsung",
-    "d8:90:e8": "Samsung", "e8:50:8b": "Samsung", "f4:0e:22": "Samsung", "fc:a1:3e": "Samsung",
-
-    # Xiaomi / Redmi / POCO
-    "00:9e:c8": "Xiaomi", "04:cf:8c": "Xiaomi", "14:f6:5a": "Xiaomi", "18:59:36": "Xiaomi",
-    "28:6c:07": "Xiaomi", "34:80:dc": "Xiaomi", "34:ce:00": "Xiaomi", "38:a4:ed": "Xiaomi",
-    "50:64:2b": "Xiaomi", "58:44:98": "Xiaomi", "58:a0:23": "Xiaomi", "64:09:80": "Xiaomi",
-    "74:23:44": "Xiaomi", "78:02:f8": "Xiaomi", "7c:1d:d9": "Xiaomi", "84:f3:eb": "Xiaomi",
-    "8c:be:be": "Xiaomi", "98:fa:e3": "Xiaomi", "a4:c3:f0": "Xiaomi", "ac:c1:ee": "Xiaomi",
-    "b0:e5:ed": "Xiaomi", "d4:97:0b": "Xiaomi", "dc:71:96": "Xiaomi", "f8:a4:5f": "Xiaomi",
-
-    # Intel
-    "00:02:b3": "Intel", "00:03:47": "Intel", "00:04:23": "Intel", "00:0e:0c": "Intel",
-    "00:13:02": "Intel", "00:13:e8": "Intel", "00:15:00": "Intel", "00:16:76": "Intel",
-    "00:1b:21": "Intel", "00:1c:c0": "Intel", "00:21:6a": "Intel", "00:23:14": "Intel",
-    "00:24:d7": "Intel", "34:13:e8": "Intel", "40:74:e0": "Intel", "48:51:b7": "Intel",
-    "54:8c:a0": "Intel", "68:05:46": "Intel", "7c:57:58": "Intel", "80:86:f2": "Intel",
-    "8c:8d:28": "Intel", "98:fa:9b": "Intel", "a4:bb:6d": "Intel", "c8:5b:76": "Intel",
-
-    # TP-Link / Mercusys
-    "00:0a:eb": "TP-Link", "00:14:78": "TP-Link", "00:19:e0": "TP-Link", "00:21:27": "TP-Link",
-    "00:23:cd": "TP-Link", "00:25:86": "TP-Link", "14:cc:20": "TP-Link", "1c:3b:f3": "TP-Link",
-    "30:b5:c2": "TP-Link", "50:c7:bf": "TP-Link", "60:32:b1": "TP-Link", "6c:5a:b0": "TP-Link",
-    "70:4f:57": "TP-Link", "84:16:f9": "TP-Link", "98:48:27": "TP-Link", "98:4a:6b": "TP-Link",
-    "a4:2b:b0": "TP-Link", "c0:06:c3": "TP-Link", "c0:25:67": "TP-Link", "e8:48:b8": "TP-Link",
-    "f4:ec:38": "TP-Link", "f8:1a:67": "TP-Link",
-
-    # Espressif / Tuya / Smart Home IoT
-    "18:fe:34": "Espressif (ESP8266/ESP32)", "24:0a:c4": "Espressif (ESP32)", "24:6f:28": "Espressif (ESP32)",
-    "24:b2:de": "Espressif (ESP32)", "2c:3a:e8": "Espressif (ESP32)", "30:ae:a4": "Espressif (ESP32)",
-    "34:7d:f6": "Espressif / Smart Device", "3c:61:05": "Espressif (ESP32)", "3c:71:bf": "Espressif (ESP32)",
-    "48:3f:da": "Espressif (ESP32)", "48:55:19": "Espressif (ESP32)", "54:43:b2": "Espressif (ESP32)",
-    "60:01:94": "Espressif (ESP8266)", "68:c6:3a": "Espressif (ESP32)", "70:03:9f": "Espressif (ESP32)",
-    "84:0d:8e": "Espressif (ESP32)", "84:f3:eb": "Tuya Smart IoT", "a4:e5:7c": "Tuya Smart IoT",
-    "b4:e6:2d": "Espressif (ESP32)", "c4:4f:33": "Espressif (ESP32)", "d8:bf:c0": "Espressif (ESP32)",
-    "dc:4f:22": "Espressif (ESP32)",
-
-    # Huawei / Honor
-    "00:1e:10": "Huawei", "00:25:9e": "Huawei", "04:25:7b": "Huawei", "08:19:a6": "Huawei",
-    "10:1b:54": "Huawei", "1c:1d:67": "Huawei", "20:08:ed": "Huawei", "28:6e:d4": "Huawei",
-    "40:4d:8e": "Huawei", "4c:54:99": "Huawei", "70:7b:e8": "Huawei", "80:b6:86": "Huawei",
-    "88:86:03": "Huawei", "94:77:2b": "Huawei", "ac:e2:15": "Huawei", "cc:96:a0": "Huawei",
-
-    # Google / Nest / Chromecast
-    "00:1a:11": "Google", "18:26:49": "Google", "1c:f5:0a": "Google", "3c:5a:37": "Google",
-    "54:60:09": "Google", "6c:ad:f8": "Google", "70:3e:ac": "Google", "80:ce:62": "Google",
-    "94:eb:cd": "Google", "a4:77:33": "Google", "d8:6c:63": "Google", "f4:03:04": "Google",
-
-    # Amazon (Echo, FireTV, Kindle)
-    "00:fc:8b": "Amazon", "0c:47:c9": "Amazon", "18:74:2e": "Amazon", "24:4c:07": "Amazon",
-    "34:d2:70": "Amazon", "38:f7:3d": "Amazon", "40:b4:cd": "Amazon", "44:65:0d": "Amazon",
-    "50:dc:e7": "Amazon", "68:37:e9": "Amazon", "74:75:48": "Amazon", "ac:63:be": "Amazon",
-
-    # Sony / PlayStation
-    "00:01:4a": "Sony", "00:04:1f": "Sony", "00:13:15": "Sony", "00:19:c5": "Sony",
-    "00:1a:80": "Sony", "00:1d:0d": "Sony", "00:24:8d": "Sony", "28:0d:fc": "Sony (PlayStation)",
-    "70:9e:29": "Sony (PlayStation)", "f8:46:1c": "Sony (PlayStation)",
-
-    # Microsoft / Xbox / Surface
-    "00:03:ff": "Microsoft", "00:0d:3a": "Microsoft", "00:12:5a": "Microsoft", "00:15:5d": "Microsoft",
-    "00:17:fa": "Microsoft", "28:18:78": "Microsoft (Surface/Xbox)", "50:1a:c5": "Microsoft",
-    "7c:ed:8d": "Microsoft (Xbox)", "98:5f:d3": "Microsoft",
-
-    # Asus, Dell, HP, Lenovo, Realtek, MediaTek, Raspberry Pi
-    "00:0c:6e": "ASUS", "04:d9:f5": "ASUS", "10:7b:44": "ASUS", "2c:fd:a1": "ASUS", "38:d5:47": "ASUS",
-    "00:14:22": "Dell", "00:1e:4f": "Dell", "18:66:da": "Dell", "34:e6:d7": "Dell", "d4:be:d9": "Dell",
-    "00:08:02": "HP", "00:18:71": "HP", "00:21:5a": "HP", "3c:d9:2b": "HP", "70:5a:0f": "HP",
-    "00:16:36": "Lenovo", "00:21:cc": "Lenovo", "48:5d:60": "Lenovo", "70:72:0d": "Lenovo",
-    "00:e0:4c": "Realtek", "52:54:00": "QEMU/KVM Virtual", "08:00:27": "VirtualBox Host/VM",
-    "b8:27:eb": "Raspberry Pi", "dc:a6:32": "Raspberry Pi", "e4:5f:01": "Raspberry Pi",
-    "8c:c6:81": "Vivo Mobile", "14:f6:d8": "Oppo Mobile", "a8:93:4a": "Realme Mobile",
-}
+# Load comprehensive 53,000+ entry IEEE OUI Database
+_OUI_DB = {}
+_OUI_PATH = os.path.join(os.path.dirname(__file__), "oui_db.json")
+try:
+    if os.path.exists(_OUI_PATH):
+        with open(_OUI_PATH, "r", encoding="utf-8") as _f:
+            _OUI_DB = json.load(_f)
+except Exception as _e:
+    log.warning(f"Could not load OUI database: {_e}")
 
 
 def is_randomized_mac(mac):
@@ -145,8 +54,8 @@ def is_randomized_mac(mac):
 
 def oui_lookup(mac):
     """
-    High-performance OUI lookup using built-in high-accuracy dictionary,
-    Scapy manufdb fallback, and MAC randomization detection.
+    Ultra-fast OUI vendor lookup using official 53,000+ IEEE database
+    and MAC randomization detection.
     """
     if not mac or mac in ("unknown", "Unknown", "-"):
         return "Unknown"
@@ -154,41 +63,33 @@ def oui_lookup(mac):
     if mac_clean in _VENDOR_OUI_CACHE:
         return _VENDOR_OUI_CACHE[mac_clean]
 
-    # 1. Check built-in prefix table
-    prefix = ":".join(mac_clean.split(":")[:3])
-    if prefix in _COMMON_OUIS:
-        vendor = _COMMON_OUIS[prefix]
-        _VENDOR_OUI_CACHE[mac_clean] = vendor
-        return vendor
-
-    # 2. Check Scapy manufdb
-    try:
-        from scapy.all import conf
-        scapy_manuf = conf.manufdb._get_manuf(mac_clean)
-        if scapy_manuf and scapy_manuf.lower() != mac_clean and scapy_manuf != "Unknown":
-            _VENDOR_OUI_CACHE[mac_clean] = scapy_manuf
-            return scapy_manuf
-    except Exception:
-        pass
-
-    # 3. Check for Private / Randomized MAC
+    # 1. Check for Private / Randomized MAC
     if is_randomized_mac(mac_clean):
         res = "Randomized MAC (Private Wi-Fi)"
-    else:
-        res = "Unknown"
+        _VENDOR_OUI_CACHE[mac_clean] = res
+        return res
 
-    _VENDOR_OUI_CACHE[mac_clean] = res
-    return res
+    # 2. Check full IEEE OUI database
+    hex_clean = mac_clean.replace(":", "").upper()
+    for length in (9, 7, 6):
+        if len(hex_clean) >= length:
+            prefix = hex_clean[:length]
+            if prefix in _OUI_DB:
+                vendor = _OUI_DB[prefix]
+                _VENDOR_OUI_CACHE[mac_clean] = vendor
+                return vendor
+
+    _VENDOR_OUI_CACHE[mac_clean] = "Unknown"
+    return "Unknown"
 
 
-def netbios_lookup(ip, timeout=0.25):
+def netbios_lookup(ip, timeout=0.15):
     """
     Direct NetBIOS Name Query (UDP 137) to discover Windows PC names,
     SMB hosts, NAS devices, and workgroups.
     """
     if not ip or ip in ("-", "Unknown"):
         return ""
-    # Standard NetBIOS wildcard query for *<00>
     pkt = (
         b"\x80\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
         b"\x20CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00\x00!\x00\x01"
@@ -204,7 +105,6 @@ def netbios_lookup(ip, timeout=0.25):
             for _ in range(num):
                 name = data[offset:offset+15].decode("latin1", errors="ignore").strip()
                 n_type = data[offset+15]
-                # Type 0 is workstation service / computer name
                 if n_type == 0 and name and not name.startswith("IS~") and name != "WORKGROUP":
                     return name
                 offset += 18
@@ -215,17 +115,15 @@ def netbios_lookup(ip, timeout=0.25):
     return ""
 
 
-def mdns_lookup(ip, timeout=0.25):
+def mdns_lookup(ip, timeout=0.15):
     """
     Lightweight mDNS / ZeroConf probe to query device name (Apple, Smart TVs, IoT).
     """
     if not ip or ip in ("-", "Unknown"):
         return ""
-    # Send reverse pointer query for IP in .in-addr.arpa to 224.0.0.251:5353
     try:
         rev_parts = ip.split(".")[::-1]
         qname = "".join(f"{len(p)}{p}" for p in rev_parts) + "\x07in-addr\x04arpa\x00"
-        # DNS header + PTR query
         dns_pkt = b"\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00" + qname.encode() + b"\x00\x0c\x00\x01"
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(timeout)
@@ -252,18 +150,19 @@ def resolve_device_name(ip):
         return (ip, _HOSTNAME_CACHE[ip])
 
     # 1. NetBIOS query (best for PCs, NAS, SMB)
-    name = netbios_lookup(ip, timeout=0.2)
+    name = netbios_lookup(ip, timeout=0.15)
     
     # 2. Reverse DNS
     if not name:
-        name = resolve_hostname(ip, timeout=0.2)
+        name = resolve_hostname(ip, timeout=0.15)
         
     # 3. mDNS probe (best for Apple / IoT / Smart devices)
     if not name:
-        name = mdns_lookup(ip, timeout=0.2)
+        name = mdns_lookup(ip, timeout=0.15)
 
     _HOSTNAME_CACHE[ip] = name
     return (ip, name)
+
 
 
 def populate_hostnames(devices):
