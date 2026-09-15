@@ -83,6 +83,33 @@ def get_interface_ipv6_link_local(iface_name):
     return "fe80::1"
 
 
+def get_interface_ipv6_prefixes(iface_name):
+    """
+    Auto-detect active global SLAAC /64 IPv6 prefixes on the interface.
+    Returns list of (prefix_str, prefix_len) tuples, e.g. [('2401:eee0:182:5::', 64)].
+    """
+    prefixes = []
+    seen = set()
+    try:
+        import ipaddress
+        addrs = psutil.net_if_addrs().get(iface_name, [])
+        for a in addrs:
+            if "INET6" in a.family.name and a.address:
+                raw_ip = a.address.split("%")[0].strip()
+                if not raw_ip.lower().startswith("fe80") and not raw_ip.startswith("::1") and ":" in raw_ip:
+                    try:
+                        net = ipaddress.IPv6Network(f"{raw_ip}/64", strict=False)
+                        p_str = str(net.network_address)
+                        if p_str not in seen:
+                            seen.add(p_str)
+                            prefixes.append((p_str, 64))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return prefixes
+
+
 def _parse_route_table():
     """
     Parse the Windows routing table and return a list of
