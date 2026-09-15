@@ -1234,9 +1234,20 @@ input:checked + .slider:before {
     animation: pulseGreen 1.5s ease-in-out infinite;
 }
 
+.session-tab-status.disconnected {
+    background: var(--accent-rose);
+    box-shadow: 0 0 10px rgba(255, 75, 110, 0.5);
+    animation: pulseRose 1.5s ease-in-out infinite;
+}
+
 @keyframes pulseGreen {
     0%, 100% { box-shadow: 0 0 6px rgba(0, 245, 160, 0.3); }
     50% { box-shadow: 0 0 16px rgba(0, 245, 160, 0.7); }
+}
+
+@keyframes pulseRose {
+    0%, 100% { box-shadow: 0 0 6px rgba(255, 75, 110, 0.3); }
+    50% { box-shadow: 0 0 16px rgba(255, 75, 110, 0.7); }
 }
 
 .session-tab-info {
@@ -1248,11 +1259,11 @@ input:checked + .slider:before {
 .session-tab-name {
     font-weight: 600;
     font-size: 0.82rem;
-    letter-spacing: 0.02em;
+    color: var(--text-primary);
 }
 
 .session-tab-subnet {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     color: var(--text-muted);
     font-family: var(--font-mono);
 }
@@ -1276,6 +1287,12 @@ input:checked + .slider:before {
     background: rgba(0, 245, 160, 0.12);
     color: var(--accent-emerald);
     border: 1px solid rgba(0, 245, 160, 0.25);
+}
+
+.session-tab-badge.disconnected {
+    background: rgba(255, 75, 110, 0.12);
+    color: var(--accent-rose);
+    border: 1px solid rgba(255, 75, 110, 0.3);
 }
 
 .session-tab-close {

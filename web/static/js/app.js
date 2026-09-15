@@ -28,6 +28,7 @@ class ThrottwinApp {
         return {
             session_id: sessionId,
             status: "IDLE",
+            link_status: "ONLINE",
             mode: "blacklist",
             limit_mbps: 1.0,
             interface: sessionId,
@@ -132,6 +133,51 @@ class ThrottwinApp {
                     if (!active.devices || active.devices.length === 0) {
                         this.triggerScan();
                     }
+                }
+                break;
+
+            case "interfaces_updated":
+                if (data.interfaces_full) {
+                    this.availableInterfaces = data.interfaces_full;
+                }
+                if (data.sessions) {
+                    this.sessionIds = data.session_ids || Object.keys(data.sessions);
+                    for (const [id, state] of Object.entries(data.sessions)) {
+                        this._ensureSession(id);
+                        this._mergeSessionState(id, state);
+                    }
+                    this.renderSessionTabs();
+                }
+                break;
+
+            case "interface_status_changed":
+                if (sid) {
+                    const sess = this._ensureSession(sid);
+                    const oldLink = sess.link_status;
+                    sess.link_status = data.link_status;
+                    if (data.router_ip) sess.router_ip = data.router_ip;
+                    if (data.state) this._mergeSessionState(sid, data.state);
+
+                    if (oldLink !== data.link_status) {
+                        if (data.link_status === "DISCONNECTED") {
+                            this.showToast(`⚠️ [${sid}] Interface disconnected / link lost!`, 'error');
+                        } else if (data.link_status === "ONLINE") {
+                            this.showToast(`🌐 [${sid}] Interface connected & online!`, 'success');
+                        }
+                    }
+                    this.renderSessionTabs();
+                    if (sid === this.activeSessionId) this.updateActiveSessionUI();
+                }
+                break;
+
+            case "session_reconnected":
+                if (sid) {
+                    this._mergeSessionState(sid, data);
+                    const sess = this._ensureSession(sid);
+                    sess.link_status = "ONLINE";
+                    this.showToast(`⚡ [${sid}] Session auto-rebound and resumed after reconnect!`, 'success');
+                    this.renderSessionTabs();
+                    if (sid === this.activeSessionId) this.updateActiveSessionUI();
                 }
                 break;
 
@@ -260,6 +306,7 @@ class ThrottwinApp {
     _mergeSessionState(sid, state) {
         const sess = this._ensureSession(sid);
         if (state.status) sess.status = state.status;
+        if (state.link_status) sess.link_status = state.link_status;
         if (state.devices) sess.devices = state.devices;
         if (state.targets) sess.targets = state.targets;
         if (state.whitelisted) sess.whitelisted = state.whitelisted;
@@ -526,8 +573,12 @@ class ThrottwinApp {
             tab.className = `session-tab ${sid === this.activeSessionId ? 'active' : ''}`;
             tab.dataset.sessionId = sid;
 
-            const statusClass = sess.status === 'RUNNING' ? 'running' : 'idle';
-            const statusLabel = sess.status === 'RUNNING' ? 'ACTIVE' : 'IDLE';
+            let statusClass = sess.status === 'RUNNING' ? 'running' : 'idle';
+            let statusLabel = sess.status === 'RUNNING' ? 'ACTIVE' : 'IDLE';
+            if (sess.link_status === 'DISCONNECTED') {
+                statusClass = 'disconnected';
+                statusLabel = 'DISCONNECTED';
+            }
             const subnet = sess.router_ip ? sess.router_ip.split('.').slice(0, 3).join('.') + '.x' : '—';
             const targetCount = (sess.targets || []).length;
             const deviceCount = (sess.devices || []).length;

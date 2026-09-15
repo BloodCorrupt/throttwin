@@ -43,6 +43,7 @@ class InterfaceSession:
         self.lock = threading.Lock()
 
         self.status = "IDLE"
+        self.link_status = "ONLINE"
         self.devices = []
         self.targets = []
         self.whitelisted = []
@@ -70,7 +71,7 @@ class InterfaceSession:
                 break
             first_run = False
 
-            if not self.interface or not self.router_ip:
+            if not self.interface or not self.router_ip or self.link_status == "DISCONNECTED":
                 continue
             try:
                 fresh = arp_scan(self.interface, self.router_ip)
@@ -97,6 +98,65 @@ class InterfaceSession:
 
     def stop_bg_discovery(self):
         self._bg_stop.set()
+
+    # ─── Hot Link Status & Auto-Rebind ─────────────────────────────────────
+
+    def on_link_status_change(self, new_status, new_gateway=None):
+        """Handle interface state changes (connect, disconnect, gateway renewal)."""
+        with self.lock:
+            old_status = self.link_status
+            self.link_status = new_status
+            if new_gateway and new_gateway != self.router_ip:
+                self.router_ip = new_gateway
+
+        if old_status != new_status:
+            log.info(f"[{self.session_id}] Interface link status changed: {old_status} -> {new_status}")
+            self.engine.broadcast_event("interface_status_changed", {
+                "session_id": self.session_id,
+                "interface": self.interface,
+                "link_status": new_status,
+                "router_ip": self.router_ip,
+                "state": self.get_state()
+            })
+
+            # If reconnected while session was running: auto-rebind!
+            if old_status == "DISCONNECTED" and new_status == "ONLINE" and self.status == "RUNNING":
+                threading.Thread(target=self._rebind_running_session, daemon=True).start()
+
+    def _rebind_running_session(self):
+        """Re-resolve MACs and refresh spoofers/shapers when interface recovers."""
+        try:
+            time.sleep(1.0)  # Short pause for DHCP/ARP table settling
+            router_mac = get_router_mac(self.router_ip, self.interface)
+            my_mac = get_my_mac(self.interface)
+            if not router_mac or not my_mac:
+                log.debug(f"[{self.session_id}] Rebind delayed: router MAC not yet reachable.")
+                return
+
+            log.info(f"[{self.session_id}] Auto-rebinding running session on reconnected interface...")
+            cleanup_traffic_shaping(self.shapers)
+            self.shapers = setup_traffic_shaping(
+                self.interface, self.targets, self.limit_mbps,
+                self.router_ip, router_mac, my_mac, self.stop_event
+            )
+
+            for ip, (t, evt) in list(self.spoof_threads.items()):
+                evt.set()
+            self.spoof_threads.clear()
+
+            for tgt in self.targets:
+                tgt_ip = tgt.get("ip") if isinstance(tgt, dict) else tgt
+                tgt_mac = tgt.get("mac") if isinstance(tgt, dict) else ""
+                if tgt_ip and tgt_ip != "-":
+                    self._spawn_spoofer(tgt_ip, tgt_mac, router_mac, my_mac)
+
+            self.engine.broadcast_event("session_reconnected", {
+                "session_id": self.session_id,
+                **self.get_state()
+            })
+            log.info(f"[{self.session_id}] Session successfully restored after reconnect.")
+        except Exception as e:
+            log.debug(f"[{self.session_id}] Rebind error: {e}")
 
     # ─── Scanning ──────────────────────────────────────────────────────────
 
@@ -462,6 +522,7 @@ class InterfaceSession:
             return {
                 "session_id": self.session_id,
                 "status": self.status,
+                "link_status": self.link_status,
                 "interface": self.interface,
                 "router_ip": self.router_ip,
                 "operational_mode": self.operational_mode,
@@ -505,6 +566,11 @@ class ThrottwinEngine:
         # Auto-detect all active interfaces and create sessions
         self._auto_detect_sessions()
 
+        # Continuous background interface hot-plug / disconnect monitor daemon
+        self._monitor_stop = threading.Event()
+        self._monitor_thread = threading.Thread(target=self._interface_monitor_worker, daemon=True)
+        self._monitor_thread.start()
+
     def _auto_detect_sessions(self):
         """Create an InterfaceSession for each active interface with a gateway."""
         ifaces = get_active_interfaces()
@@ -530,6 +596,62 @@ class ThrottwinEngine:
                 router_ip=gw,
                 engine=self
             )
+
+    def _interface_monitor_worker(self):
+        """
+        Continuous daemon monitoring for interface hot-plug, disconnect, and reconnect.
+        Runs every 2.5s to detect physical adapter insertions, link-drops, and gateway updates.
+        """
+        last_iface_set = set()
+        while not self._monitor_stop.is_set():
+            if self._monitor_stop.wait(2.5):
+                break
+            try:
+                active_ifaces = get_active_interfaces()
+                active_map = {i["name"]: i for i in active_ifaces}
+                current_iface_set = set(active_map.keys())
+
+                # 1. Update link state and gateway for all registered sessions
+                for sid, session in list(self.sessions.items()):
+                    iface_name = session.interface
+                    if iface_name in active_map:
+                        gw = active_map[iface_name].get("gateway")
+                        session.on_link_status_change("ONLINE", new_gateway=gw)
+                    else:
+                        session.on_link_status_change("DISCONNECTED")
+
+                # 2. Check for hot-plugged new interfaces
+                changed = current_iface_set != last_iface_set
+                for iface in active_ifaces:
+                    name = iface["name"]
+                    gateway = iface.get("gateway")
+                    if gateway and name not in self.sessions:
+                        new_session = InterfaceSession(
+                            session_id=name,
+                            interface=name,
+                            router_ip=gateway,
+                            engine=self
+                        )
+                        self.sessions[name] = new_session
+                        changed = True
+                        log.info(f"Hot-detected new interface: {name} (gateway: {gateway})")
+                        self.broadcast_event("session_created", {
+                            "session_id": name,
+                            "interface": name,
+                            "router_ip": gateway,
+                        })
+
+                if changed:
+                    last_iface_set = current_iface_set
+                    self.broadcast_event("interfaces_updated", {
+                        "interfaces": [i["name"] for i in active_ifaces],
+                        "interfaces_full": active_ifaces,
+                        "sessions": self.get_all_sessions_state(),
+                        "session_ids": list(self.sessions.keys())
+                    })
+
+            except Exception as e:
+                log.debug(f"Interface monitor error: {e}")
 
     # ─── SSE Events ────────────────────────────────────────────────────────
 

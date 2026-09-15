@@ -168,12 +168,37 @@ def get_active_interfaces():
     return interfaces
 
 
+def refresh_scapy_interfaces():
+    """Reload Scapy interface cache to discover hot-plugged adapters (USB dongles, tethering, etc.)."""
+    try:
+        from scapy.all import conf
+        if hasattr(conf.ifaces, "reload"):
+            conf.ifaces.reload()
+    except Exception:
+        pass
+
+
+def get_interface_status(iface_name):
+    """Return link status for an interface: 'UP', 'DOWN', or 'DISCONNECTED'."""
+    stats = psutil.net_if_stats()
+    if iface_name not in stats:
+        return "DISCONNECTED"
+    return "UP" if stats[iface_name].isup else "DOWN"
+
+
 def get_scapy_interface(friendly_name):
     """
     Map a friendly interface name (e.g. 'Wi-Fi') to a Scapy NPF network_name.
+    Auto-reloads Scapy interface cache if not found on first attempt (for hot-plugged adapters).
     """
     try:
         from scapy.all import get_working_ifaces
+        for iface in get_working_ifaces():
+            if iface.name == friendly_name or iface.description == friendly_name:
+                return iface.network_name
+
+        # Not found — reload Scapy cache for hot-plugged devices and retry
+        refresh_scapy_interfaces()
         for iface in get_working_ifaces():
             if iface.name == friendly_name or iface.description == friendly_name:
                 return iface.network_name

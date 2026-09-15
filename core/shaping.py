@@ -110,23 +110,26 @@ class TrafficShaper:
         return self.speed_bps / 1_000_000
 
     def _sniffer(self):
-        """Capture packets from the intercepted target on our interface."""
-        try:
-            from scapy.all import sniff, IP
-            from .network import get_scapy_interface
-            npf_iface = get_scapy_interface(self.interface)
+        """Capture packets from the intercepted target on our interface with auto-recovery."""
+        from scapy.all import sniff, IP
+        from .network import get_scapy_interface
 
-            bpf = f"ip and (src host {self.target_ip} or dst host {self.target_ip})"
+        bpf = f"ip and (src host {self.target_ip} or dst host {self.target_ip})"
 
-            sniff(
-                iface=npf_iface,
-                filter=bpf,
-                prn=self._on_packet,
-                store=False,
-                stop_filter=lambda _: self.stop_event.is_set(),
-            )
-        except Exception as e:
-            log.warning(f"Sniffer error for {self.target_ip}: {e}")
+        while not self.stop_event.is_set():
+            try:
+                npf_iface = get_scapy_interface(self.interface)
+                sniff(
+                    iface=npf_iface,
+                    filter=bpf,
+                    prn=self._on_packet,
+                    store=False,
+                    stop_filter=lambda _: self.stop_event.is_set(),
+                )
+            except Exception as e:
+                log.debug(f"Sniffer error for {self.target_ip} (interface may be reconnecting): {e}")
+                if self.stop_event.wait(1.5):
+                    break
 
     def _on_packet(self, pkt):
         """Queue captured packet for rate-limited forwarding."""
@@ -136,7 +139,7 @@ class TrafficShaper:
             pass  # Drop when queue full (congestion control)
 
     def _forwarder(self):
-        """Dequeue packets, apply token-bucket limit, then forward."""
+        """Dequeue packets, apply token-bucket limit, then forward with auto-recovery."""
         try:
             from scapy.all import Ether, IP, sendp
             from .network import get_scapy_interface
@@ -175,10 +178,11 @@ class TrafficShaper:
                             )
                         sendp(fwd, iface=npf_iface, verbose=0)
                 except Exception as e:
-                    log.debug(f"Forward error: {e}")
+                    log.debug(f"Forward error (interface reconnecting?): {e}")
+                    npf_iface = get_scapy_interface(self.interface)
 
         except Exception as e:
-            log.warning(f"Forwarder error for {self.target_ip}: {e}")
+            log.debug(f"Forwarder error for {self.target_ip}: {e}")
 
 
 def enable_ip_forwarding():

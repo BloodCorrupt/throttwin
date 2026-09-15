@@ -38,11 +38,12 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
                 sendp(pkt_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_to_router, iface=npf_iface, verbose=0)
             except Exception as e:
-                log.warning(f"ARP send error for {target_ip}: {e}")
+                log.debug(f"ARP send error for {target_ip} (interface may be reconnecting): {e}")
+                npf_iface = get_scapy_interface(interface)
             stop_event.wait(1.5)
 
     except Exception as e:
-        log.error(f"ARP spoof loop failed for {target_ip}: {e}")
+        log.debug(f"ARP spoof loop exception for {target_ip}: {e}")
     finally:
         # Restore ARP tables on exit
         _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac)
