@@ -1,18 +1,23 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Throttwin — Windows Bandwidth Limiter</title>
-    <meta name="description" content="Throttwin: High-Performance Per-Device Bandwidth Limiter via ARP Spoofing for Windows with Npcap.">
+    <meta name="description"
+        content="Throttwin: High-Performance Per-Device Bandwidth Limiter via ARP Spoofing for Windows with Npcap.">
     <!-- Google Fonts: Outfit & JetBrains Mono -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet">
     <!-- FontAwesome for modern icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
+
 <body>
     <div class="app-layout">
         <!-- Sidebar Navigation -->
@@ -22,7 +27,7 @@
                     <i class="fa-solid fa-bolt-lightning"></i>
                 </div>
                 <div class="brand-text">
-                    <h1>THROTTWIN <span class="brand-plus">WIN</span></h1>
+                    <h1>THROTTWIN <span class="brand-plus">WINDOWS</span></h1>
                     <span>v2.0 Windows Edition</span>
                 </div>
             </div>
@@ -134,11 +139,14 @@
                     </div>
                     <div class="radar-info">
                         <div class="radar-title">
-                            <span class="badge badge-whitelist"><i class="fa-solid fa-shield-virus"></i> Auto-Throttle Radar Active</span>
+                            <span class="badge badge-whitelist"><i class="fa-solid fa-shield-virus"></i> Auto-Throttle
+                                Radar Active</span>
                             <span class="radar-live-pill">LIVE PROBING</span>
                         </div>
                         <p class="radar-desc">
-                            Background scanner actively probing network every 8s. Any newly arriving device outside the whitelist will be <strong>auto-throttled to <span id="radarLimitVal">1.0</span> Mbps</strong> on the fly without session interruption.
+                            Background scanner actively probing network every 8s. Any newly arriving device outside the
+                            whitelist will be <strong>auto-throttled to <span id="radarLimitVal">1.0</span>
+                                Mbps</strong> on the fly without session interruption.
                         </p>
                     </div>
                     <div class="radar-stats">
@@ -172,12 +180,15 @@
                         <div class="speed-presets-bar">
                             <span class="presets-label"><i class="fa-solid fa-bolt"></i> Bandwidth Limit:</span>
                             <div class="presets-container">
-                                <button class="preset-pill" data-speed="0.5">0.5 Mbps <span>(Heavy Buffer)</span></button>
-                                <button class="preset-pill active" data-speed="1.0">1.0 Mbps <span>(Default)</span></button>
+                                <button class="preset-pill" data-speed="0.5">0.5 Mbps <span>(Heavy
+                                        Buffer)</span></button>
+                                <button class="preset-pill active" data-speed="1.0">1.0 Mbps
+                                    <span>(Default)</span></button>
                                 <button class="preset-pill" data-speed="2.0">2.0 Mbps <span>(480p)</span></button>
                                 <button class="preset-pill" data-speed="3.0">3.0 Mbps <span>(720p)</span></button>
                                 <div class="custom-speed-wrapper">
-                                    <input type="number" id="customSpeedInput" min="0.1" max="1000" step="0.1" placeholder="Custom" class="input-dark custom-speed-input">
+                                    <input type="number" id="customSpeedInput" min="0.1" max="1000" step="0.1"
+                                        placeholder="Custom" class="input-dark custom-speed-input">
                                     <span class="input-suffix">Mbps</span>
                                 </div>
                                 <button class="btn btn-primary btn-sm" id="btnApplyLiveLimit" style="display: none;">
@@ -278,7 +289,8 @@
                             </button>
                         </div>
                         <div class="card-body">
-                            <p class="rules-desc">Devices with these hardware MAC addresses are automatically marked safe and permanently immune to shaping.</p>
+                            <p class="rules-desc">Devices with these hardware MAC addresses are automatically marked
+                                safe and permanently immune to shaping.</p>
                             <div class="rules-list" id="whitelistRulesContainer">
                                 <!-- Injected by JS -->
                             </div>
@@ -297,7 +309,8 @@
                             </button>
                         </div>
                         <div class="card-body">
-                            <p class="rules-desc">Devices matching these MAC addresses are auto-selected as throttle targets whenever a session is initiated.</p>
+                            <p class="rules-desc">Devices matching these MAC addresses are auto-selected as throttle
+                                targets whenever a session is initiated.</p>
                             <div class="rules-list" id="blacklistRulesContainer">
                                 <!-- Injected by JS -->
                             </div>
@@ -314,34 +327,46 @@
                             <i class="fa-solid fa-sliders"></i>
                             <h3>Network & Engine Settings</h3>
                         </div>
-                        <button class="btn btn-secondary btn-sm" id="btnAutoDetectSettings" title="Re-detect network interface and gateway">
+                        <button class="btn btn-secondary btn-sm" id="btnAutoDetectSettings"
+                            title="Re-detect network interface and gateway">
                             <i class="fa-solid fa-wand-magic-sparkles cyan"></i> Auto Detect
                         </button>
                     </div>
                     <div class="card-body">
                         <div class="form-group">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
-                                <label class="form-label" for="settingInterface" style="margin-bottom: 0;">Network Interface</label>
-                                <span class="badge badge-whitelist" id="badgeInterfaceStatus" style="font-size: 0.72rem; padding: 2px 8px;"><i class="fa-solid fa-bolt"></i> Auto-Detected</span>
+                            <div
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+                                <label class="form-label" for="settingInterface" style="margin-bottom: 0;">Network
+                                    Interface</label>
+                                <span class="badge badge-whitelist" id="badgeInterfaceStatus"
+                                    style="font-size: 0.72rem; padding: 2px 8px;"><i class="fa-solid fa-bolt"></i>
+                                    Auto-Detected</span>
                             </div>
                             <select id="settingInterface" class="input-dark select-dark"></select>
-                            <span class="form-help">Select the active Windows network adapter (changing auto-detects its router gateway).</span>
+                            <span class="form-help">Select the active Windows network adapter (changing auto-detects its
+                                router gateway).</span>
                         </div>
 
                         <div class="form-group">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
-                                <label class="form-label" for="settingRouterIp" style="margin-bottom: 0;">Router / Gateway IP</label>
-                                <button type="button" class="btn btn-secondary btn-sm" id="btnAutoDetectGateway" style="padding: 3px 10px; font-size: 0.75rem;" title="Auto-detect gateway for selected interface">
+                            <div
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+                                <label class="form-label" for="settingRouterIp" style="margin-bottom: 0;">Router /
+                                    Gateway IP</label>
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnAutoDetectGateway"
+                                    style="padding: 3px 10px; font-size: 0.75rem;"
+                                    title="Auto-detect gateway for selected interface">
                                     <i class="fa-solid fa-arrows-rotate"></i> Detect Gateway
                                 </button>
                             </div>
                             <input type="text" id="settingRouterIp" class="input-dark" placeholder="192.168.1.1">
-                            <span class="form-help">Default gateway IP dynamically resolved from Windows kernel routing table.</span>
+                            <span class="form-help">Default gateway IP dynamically resolved from Windows kernel routing
+                                table.</span>
                         </div>
 
                         <div class="form-group">
                             <label class="form-label" for="settingDefaultLimit">Default Bandwidth Limit (Mbps)</label>
-                            <input type="number" id="settingDefaultLimit" class="input-dark" value="1.0" min="0.1" step="0.1">
+                            <input type="number" id="settingDefaultLimit" class="input-dark" value="1.0" min="0.1"
+                                step="0.1">
                             <span class="form-help">Default throttling speed assigned on startup.</span>
                         </div>
 
@@ -419,4 +444,5 @@
 
     <script src="/static/js/app.js"></script>
 </body>
+
 </html>
