@@ -112,11 +112,14 @@ class TrafficShaper:
     def _sniffer(self):
         """Capture both IPv4 and IPv6 packets from the intercepted target on our interface with auto-recovery."""
         from scapy.all import sniff
-        from .network import get_scapy_interface
+        from .network import get_scapy_interface, mac_to_ipv6_ll
 
-        # Capture traffic associated with target MAC (both IPv4 and IPv6) or fallback to target IPv4
+        # Capture:
+        # 1. Upstream: all packets sent from target MAC (both IPv4 and IPv6)
+        # 2. Downstream: all packets returning from router to target IP / target IPv6 link-local
         if self.target_mac and self.target_mac not in ("unknown", "Unknown", "-", ""):
-            bpf = f"(ether host {self.target_mac}) and (ip or ip6)"
+            target_ll = mac_to_ipv6_ll(self.target_mac)
+            bpf = f"(ether src {self.target_mac}) or (dst host {self.target_ip}) or (dst host {target_ll})"
         else:
             bpf = f"src host {self.target_ip} or dst host {self.target_ip}"
 

