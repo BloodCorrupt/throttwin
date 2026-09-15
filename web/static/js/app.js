@@ -555,17 +555,24 @@ class ThrottwinApp {
         const tabsBar = document.getElementById('sessionTabsBar');
         if (!container || !tabsBar) return;
 
-        container.innerHTML = '';
-
         const ids = this.sessionIds.length ? this.sessionIds : Object.keys(this.sessions);
+        const existingTabs = {};
+        container.querySelectorAll('.session-tab').forEach(tab => {
+            const sid = tab.dataset.sessionId;
+            if (sid) existingTabs[sid] = tab;
+        });
+
+        // Remove tabs that no longer exist
+        Object.keys(existingTabs).forEach(sid => {
+            if (!ids.includes(sid)) {
+                existingTabs[sid].remove();
+                delete existingTabs[sid];
+            }
+        });
 
         ids.forEach(sid => {
             const sess = this.sessions[sid];
             if (!sess) return;
-
-            const tab = document.createElement('button');
-            tab.className = `session-tab ${sid === this.activeSessionId ? 'active' : ''}`;
-            tab.dataset.sessionId = sid;
 
             let statusClass = sess.status === 'RUNNING' ? 'running' : 'idle';
             let statusLabel = sess.status === 'RUNNING' ? 'ACTIVE' : 'IDLE';
@@ -576,27 +583,72 @@ class ThrottwinApp {
             const subnet = sess.router_ip ? sess.router_ip.split('.').slice(0, 3).join('.') + '.x' : '—';
             const targetCount = (sess.targets || []).length;
             const deviceCount = (sess.devices || []).length;
+            const isActive = (sid === this.activeSessionId);
 
-            tab.innerHTML = `
-                <div class="session-tab-status ${statusClass}"></div>
-                <div class="session-tab-info">
-                    <span class="session-tab-name">${sid}</span>
-                    <span class="session-tab-subnet">${subnet} · ${deviceCount} dev${deviceCount !== 1 ? 's' : ''}</span>
-                </div>
-                <span class="session-tab-badge ${statusClass}">${statusLabel}${targetCount > 0 ? ` (${targetCount})` : ''}</span>
-                ${ids.length > 1 && sess.status !== 'RUNNING' ? `<button class="session-tab-close" data-close-session="${sid}" title="Remove session">&times;</button>` : ''}
-            `;
+            let tab = existingTabs[sid];
+            if (!tab) {
+                tab = document.createElement('button');
+                tab.className = `session-tab ${isActive ? 'active' : ''}`;
+                tab.dataset.sessionId = sid;
+                tab.innerHTML = `
+                    <div class="session-tab-status ${statusClass}"></div>
+                    <div class="session-tab-info">
+                        <span class="session-tab-name">${sid}</span>
+                        <span class="session-tab-subnet">${subnet} · ${deviceCount} dev${deviceCount !== 1 ? 's' : ''}</span>
+                    </div>
+                    <span class="session-tab-badge ${statusClass}">${statusLabel}${targetCount > 0 ? ` (${targetCount})` : ''}</span>
+                    ${ids.length > 1 && sess.status !== 'RUNNING' ? `<button class="session-tab-close" data-close-session="${sid}" title="Remove session">&times;</button>` : ''}
+                `;
 
-            tab.addEventListener('click', (e) => {
-                if (e.target.classList.contains('session-tab-close')) {
-                    e.stopPropagation();
-                    this.deleteSession(e.target.dataset.closeSession);
-                    return;
+                tab.addEventListener('click', (e) => {
+                    if (e.target.classList.contains('session-tab-close')) {
+                        e.stopPropagation();
+                        this.deleteSession(e.target.dataset.closeSession);
+                        return;
+                    }
+                    this.switchSession(sid);
+                });
+
+                container.appendChild(tab);
+            } else {
+                // In-place update without destroying DOM elements (zero flicker!)
+                const expectedClass = `session-tab ${isActive ? 'active' : ''}`;
+                if (tab.className !== expectedClass) tab.className = expectedClass;
+
+                const dot = tab.querySelector('.session-tab-status');
+                if (dot && dot.className !== `session-tab-status ${statusClass}`) {
+                    dot.className = `session-tab-status ${statusClass}`;
                 }
-                this.switchSession(sid);
-            });
 
-            container.appendChild(tab);
+                const sub = tab.querySelector('.session-tab-subnet');
+                const subText = `${subnet} · ${deviceCount} dev${deviceCount !== 1 ? 's' : ''}`;
+                if (sub && sub.textContent !== subText) {
+                    sub.textContent = subText;
+                }
+
+                const badge = tab.querySelector('.session-tab-badge');
+                const badgeText = `${statusLabel}${targetCount > 0 ? ` (${targetCount})` : ''}`;
+                if (badge) {
+                    if (badge.className !== `session-tab-badge ${statusClass}`) {
+                        badge.className = `session-tab-badge ${statusClass}`;
+                    }
+                    if (badge.textContent !== badgeText) {
+                        badge.textContent = badgeText;
+                    }
+                }
+
+                const closeBtn = tab.querySelector('.session-tab-close');
+                if (ids.length > 1 && sess.status !== 'RUNNING' && !closeBtn) {
+                    const btn = document.createElement('button');
+                    btn.className = 'session-tab-close';
+                    btn.dataset.closeSession = sid;
+                    btn.title = 'Remove session';
+                    btn.innerHTML = '&times;';
+                    tab.appendChild(btn);
+                } else if ((ids.length <= 1 || sess.status === 'RUNNING') && closeBtn) {
+                    closeBtn.remove();
+                }
+            }
         });
 
         // Show/hide tab bar
@@ -836,6 +888,8 @@ class ThrottwinApp {
             const tr = document.createElement('tr');
             const macLower = (dev.mac || '').toLowerCase();
             const ip = dev.ip || '-';
+            tr.dataset.ip = ip;
+            tr.dataset.mac = macLower;
 
             const isGlobalWl = macLower in globalWl;
             const isGlobalBl = macLower in globalBl;
@@ -993,6 +1047,70 @@ class ThrottwinApp {
             selectAllCb.checked = totalSelectable > 0 && totalChecked === totalSelectable;
             selectAllCb.indeterminate = totalChecked > 0 && totalChecked < totalSelectable;
             selectAllCb.disabled = isRunning;
+        }
+    }
+
+    updateTelemetryInTable(sess) {
+        if (!sess || sess.status !== "RUNNING") return;
+        const tbody = document.getElementById('devicesTableBody');
+        if (!tbody) return;
+
+        const teleMap = {};
+        (sess.telemetry || []).forEach(t => {
+            if (t.ip) teleMap[t.ip] = t;
+        });
+
+        const runningTargetIps = new Set(
+            (sess.targets || []).map(t => (typeof t === 'string' ? t : t.ip))
+        );
+
+        const rows = tbody.querySelectorAll('tr[data-ip]');
+        if (rows.length === 0) {
+            this.renderDashboardTable();
+            return;
+        }
+
+        let needsFullRender = false;
+
+        rows.forEach(tr => {
+            const ip = tr.dataset.ip;
+            const isCurrentlyThrottled = runningTargetIps.has(ip);
+            const speedCell = tr.querySelector('.live-speed-cell');
+            const dot = tr.querySelector('.status-dot-sm');
+
+            if (isCurrentlyThrottled) {
+                const tele = teleMap[ip];
+                if (!speedCell) {
+                    needsFullRender = true;
+                    return;
+                }
+
+                const speedKbps = tele ? tele.speed_kbps : 0.0;
+                const speedMbps = tele ? tele.speed_mbps : 0.00;
+                const maxCapKbps = (sess.limit_mbps * 125.0);
+                const pct = Math.min(Math.round((speedKbps / Math.max(maxCapKbps, 1)) * 100), 100);
+
+                const pill = speedCell.querySelector('.device-speed-pill');
+                const mbpsText = speedCell.querySelector('.speed-mbps-text');
+                const bar = speedCell.querySelector('.speed-meter-bar');
+
+                if (pill) pill.textContent = `${speedKbps} KB/s`;
+                if (mbpsText) mbpsText.textContent = `${speedMbps} MB/s (${pct}%)`;
+                if (bar) bar.style.width = `${pct}%`;
+
+                if (dot && tele) {
+                    dot.className = `status-dot-sm ${tele.is_online ? 'online' : 'offline'}`;
+                    dot.title = tele.is_online ? 'Online & Active' : 'Probing / Offline';
+                }
+            } else {
+                if (speedCell) {
+                    needsFullRender = true;
+                }
+            }
+        });
+
+        if (needsFullRender) {
+            this.renderDashboardTable();
         }
     }
 
@@ -1706,7 +1824,7 @@ class ThrottwinApp {
                                 if (statThroughputMbps) statThroughputMbps.textContent = `${data.total_speed_mbps || '0.00'} Mbps total speed`;
                                 const statData = document.getElementById('statDataTransferred');
                                 if (statData) statData.innerHTML = `${data.total_data_mb || '0.00'} <span class="unit">MB</span>`;
-                                this.renderDashboardTable();
+                                this.updateTelemetryInTable(sess);
                             }
                             this.renderSessionTabs();
                         }
