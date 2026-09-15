@@ -167,12 +167,17 @@ def _whitelist_watcher(interface, router_ip, targets, whitelist_devices,
     are automatically throttled via the on_new_device callback.
     """
     known_ips = {tgt.get("ip") if isinstance(tgt, dict) else tgt for tgt in targets}
+    from .config import get_predefined_whitelist
+    global_wl = set(get_predefined_whitelist().keys())
     if whitelist_devices:
-        safe_macs = {d.get("mac", "").lower() for d in whitelist_devices if isinstance(d, dict)}
-        safe_ips  = {d.get("ip") for d in whitelist_devices if isinstance(d, dict)}
+        safe_macs = {d.get("mac", "").lower() for d in whitelist_devices if isinstance(d, dict) and d.get("mac")}
+        safe_ips  = {d.get("ip") for d in whitelist_devices if isinstance(d, dict) and d.get("ip")}
     else:
         safe_macs = set()
         safe_ips  = set()
+
+    for pmac in global_wl:
+        safe_macs.add(pmac.lower())
 
     while not stop_event.is_set():
         stop_event.wait(12)

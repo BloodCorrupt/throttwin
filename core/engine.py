@@ -249,6 +249,11 @@ class ThrottwinEngine:
             save_config(interface, router_ip, mode, self.targets, self.limit_mbps,
                         whitelisted=self.whitelisted)
 
+            # Start dynamic whitelist watcher if in whitelist mode
+            if mode == "whitelist":
+                self.watcher_thread = threading.Thread(target=self._whitelist_watcher_worker, daemon=True)
+                self.watcher_thread.start()
+
             self.broadcast_event("session_started", self.get_state())
             return True, "Session started successfully."
         except Exception as e:
@@ -337,6 +342,9 @@ class ThrottwinEngine:
             t.join(timeout=2)
         self.spoof_threads.clear()
 
+        if self.watcher_thread and self.watcher_thread.is_alive():
+            self.watcher_thread = None
+
         cleanup_traffic_shaping(self.shapers)
         disable_ip_forwarding()
 
@@ -346,6 +354,86 @@ class ThrottwinEngine:
             self.shapers            = {}
 
         self.broadcast_event("session_stopped", self.get_state())
+
+    def _whitelist_watcher_worker(self):
+        """
+        Dynamic high-speed ARP watcher for Whitelist Mode.
+        Actively scans the local network every 8-10s. Any newly arriving device
+        outside the whitelist is automatically throttled and spoofed on the fly
+        without session interruption.
+        """
+        safe_macs = {
+            (dev.get("mac") if isinstance(dev, dict) else "").lower()
+            for dev in self.whitelisted
+            if isinstance(dev, dict) and dev.get("mac")
+        }
+        for pmac in get_predefined_whitelist().keys():
+            safe_macs.add(pmac.lower())
+
+        safe_ips = {
+            (dev.get("ip") if isinstance(dev, dict) else dev)
+            for dev in self.whitelisted
+            if (dev.get("ip") if isinstance(dev, dict) else dev) and (dev.get("ip") if isinstance(dev, dict) else dev) != "-"
+        }
+
+        while self.stop_event and not self.stop_event.is_set():
+            if self.stop_event.wait(8):
+                break
+            if not self.current_interface or not self.current_router_ip or self.operational_mode != "whitelist":
+                continue
+
+            try:
+                found = arp_scan(self.current_interface, self.current_router_ip)
+            except Exception as e:
+                log.warning(f"Whitelist watcher scan error: {e}")
+                continue
+
+            # Merge with master device cache
+            with self.lock:
+                self.devices = merge_devices(self.devices, found)
+
+            router_mac = get_router_mac(self.current_router_ip, self.current_interface)
+            my_mac     = get_my_mac(self.current_interface)
+
+            for dev in found:
+                if self.stop_event and self.stop_event.is_set():
+                    break
+
+                dev_ip  = dev.get("ip")
+                dev_mac = (dev.get("mac") or "").lower()
+
+                if not dev_ip or dev_ip == "-":
+                    continue
+
+                # Whitelist protection: never throttle whitelisted devices
+                if (dev_mac and dev_mac in safe_macs) or (dev_ip in safe_ips):
+                    if dev_mac and dev_mac in safe_macs and dev_ip not in safe_ips:
+                        safe_ips.add(dev_ip)
+                    continue
+
+                with self.lock:
+                    if dev_ip in self.shapers:
+                        continue
+
+                    # Auto-trap: hotplug traffic shaping and spoofing for new unwhitelisted device
+                    shaper = add_target_shaping(
+                        self.current_interface, dev_ip, dev_mac,
+                        self.current_router_ip, router_mac, my_mac,
+                        self.limit_mbps, self.stop_event
+                    )
+                    self.shapers[dev_ip] = shaper
+                    self._spawn_spoofer(
+                        self.current_interface, dev_ip, dev_mac,
+                        self.current_router_ip, router_mac, my_mac
+                    )
+                    self.targets.append(dev)
+                    log.info(f"Auto-trapped new device in whitelist mode: {dev_ip} ({dev_mac})")
+
+                self.broadcast_event("target_added", {
+                    "ip": dev_ip,
+                    "device": dev,
+                    "state": self.get_state()
+                })
 
     # ─── State ─────────────────────────────────────────────────────────────────
 
