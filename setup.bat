@@ -56,7 +56,7 @@ if errorlevel 1 (
         echo  [WARNING] Throttwin requires Npcap to capture and inject packets.
         echo  [WARNING] Download from: https://npcap.com/#download
         echo.
-        echo  Press any key to continue setup anyway (install Npcap separately)...
+        echo  Press any key to continue setup anyway ^(install Npcap separately^)...
         pause >nul
     ) else (
         echo  [OK] WinPcap/Npcap driver found
