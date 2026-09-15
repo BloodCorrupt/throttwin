@@ -158,27 +158,37 @@ def match_saved_whitelist(config, devices):
 # ─── Rules ─────────────────────────────────────────────────────────────────────
 
 def load_predefined_rules():
-    if not os.path.exists(RULES_FILE):
-        return {"whitelist": {}, "blacklist": {}}
+    rules = {"whitelist": {}, "blacklist": {}}
+    if os.path.exists(RULES_FILE):
+        try:
+            with open(RULES_FILE, "r") as f:
+                data = json.load(f)
+            for cat in ("whitelist", "blacklist"):
+                for item in data.get(cat, []):
+                    if isinstance(item, dict):
+                        mac  = item.get("mac", "").lower().strip()
+                        name = item.get("name", "").strip()
+                        if mac:
+                            rules[cat][mac] = name
+                    elif isinstance(item, str):
+                        mac = item.lower().strip()
+                        if mac:
+                            rules[cat][mac] = ""
+        except Exception as e:
+            log.warning(f"Failed to load rules: {e}")
+
+    # Automatically ensure all local host adapter MACs are included in the whitelist
     try:
-        with open(RULES_FILE, "r") as f:
-            data = json.load(f)
-        rules = {"whitelist": {}, "blacklist": {}}
-        for cat in ("whitelist", "blacklist"):
-            for item in data.get(cat, []):
-                if isinstance(item, dict):
-                    mac  = item.get("mac", "").lower().strip()
-                    name = item.get("name", "").strip()
-                    if mac:
-                        rules[cat][mac] = name
-                elif isinstance(item, str):
-                    mac = item.lower().strip()
-                    if mac:
-                        rules[cat][mac] = ""
-        return rules
-    except Exception as e:
-        log.warning(f"Failed to load rules: {e}")
-        return {"whitelist": {}, "blacklist": {}}
+        from .network import get_all_local_ips_and_macs
+        _, all_macs = get_all_local_ips_and_macs()
+        for mac in all_macs:
+            mac_clean = mac.lower().replace("-", ":")
+            if mac_clean and mac_clean not in rules["whitelist"]:
+                rules["whitelist"][mac_clean] = "Host Machine (This PC)"
+    except Exception:
+        pass
+
+    return rules
 
 
 def save_predefined_rules(rules):

