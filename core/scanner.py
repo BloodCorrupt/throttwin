@@ -52,6 +52,39 @@ def is_randomized_mac(mac):
     return False
 
 
+_VENDOR_ALIASES = {
+    "CLOUD NETWORK TECHNOLOGY": "Cloud Network (Realtek)",
+    "HON HAI PRECISION": "Foxconn",
+    "AZUREWAVE TECHNOLOGY": "AzureWave (Realtek/Broadcom)",
+    "SHENZHEN BILIAN ELECTRONIC": "LB-Link (Realtek)",
+    "CHICONY ELECTRONICS": "Chicony",
+    "LITEON TECHNOLOGY": "Lite-On",
+    "MURATA MANUFACTURING": "Murata Wi-Fi",
+    "XIAOMI COMMUNICATIONS": "Xiaomi",
+    "SAMSUNG ELECTRONICS": "Samsung",
+    "INTEL CORPORATE": "Intel",
+    "HUAWEI TECHNOLOGIES": "Huawei",
+    "OPPO MOBILE": "Oppo Mobile",
+    "GUANGDONG OPPO": "Oppo Mobile",
+    "VIVO MOBILE": "Vivo Mobile",
+    "REALME": "Realme Mobile",
+    "TP-LINK": "TP-Link",
+    "MERCUSYS": "Mercusys",
+    "ESPRESSIF": "Espressif",
+    "TUYA SMART": "Tuya Smart",
+}
+
+
+def clean_vendor_name(vendor):
+    if not vendor or vendor in ("Unknown", "unknown", "-"):
+        return "Unknown"
+    v_upper = vendor.upper().strip()
+    for pattern, alias in _VENDOR_ALIASES.items():
+        if pattern in v_upper:
+            return alias
+    return vendor
+
+
 def oui_lookup(mac):
     """
     Ultra-fast OUI vendor lookup using official 53,000+ IEEE database
@@ -75,12 +108,14 @@ def oui_lookup(mac):
         if len(hex_clean) >= length:
             prefix = hex_clean[:length]
             if prefix in _OUI_DB:
-                vendor = _OUI_DB[prefix]
+                raw_vendor = _OUI_DB[prefix]
+                vendor = clean_vendor_name(raw_vendor)
                 _VENDOR_OUI_CACHE[mac_clean] = vendor
                 return vendor
 
     _VENDOR_OUI_CACHE[mac_clean] = "Unknown"
     return "Unknown"
+
 
 
 def netbios_lookup(ip, timeout=0.15):
