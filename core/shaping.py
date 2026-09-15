@@ -70,13 +70,29 @@ class TrafficShaper:
                  my_mac, limit_mbps, stop_event):
         self.interface  = interface
         self.target_ip  = target_ip
-        self.target_mac = target_mac
+        self.target_mac = (target_mac or "").lower().replace("-", ":")
         self.router_ip  = router_ip
-        self.router_mac = router_mac
-        self.my_mac     = my_mac
+        self.router_mac = (router_mac or "").lower().replace("-", ":")
+        self.my_mac     = (my_mac or "").lower().replace("-", ":")
         self.stop_event = stop_event
 
         self.observed_ipv6_addrs = set()
+
+        from .network import get_all_local_ips_and_macs, get_all_local_ipv6_addrs, mac_to_ipv6_ll
+        all_ips, all_macs = get_all_local_ips_and_macs()
+        self.target_ipv6_ll = mac_to_ipv6_ll(self.target_mac).lower() if self.target_mac else ""
+
+        if (
+            not self.target_ip
+            or self.target_ip in ("-", "0.0.0.0", "127.0.0.1", self.router_ip)
+            or self.target_ip in all_ips
+            or self.target_mac in all_macs
+            or self.target_mac in (self.router_mac, self.my_mac)
+        ):
+            self._disabled = True
+            log.warning(f"TrafficShaper disabled for self/gateway: {self.target_ip} ({self.target_mac})")
+        else:
+            self._disabled = False
 
         rate_bps = int(limit_mbps * 1_000_000 / 8)
         self.bucket = TokenBucket(rate_bps)
@@ -91,6 +107,9 @@ class TrafficShaper:
         self._sniff_thread = threading.Thread(target=self._sniffer, daemon=True)
 
     def start(self):
+        if self._disabled:
+            log.warning(f"Refusing to start TrafficShaper for self/gateway {self.target_ip}")
+            return
         self._fwd_thread.start()
         self._sniff_thread.start()
         log.info(f"Traffic shaper started for {self.target_ip} @ {self.bucket.rate_bps/125000:.2f} Mbps")
@@ -113,13 +132,12 @@ class TrafficShaper:
 
     def _sniffer(self):
         """Capture both IPv4 and IPv6 packets from the intercepted target on our interface with auto-recovery."""
+        if self._disabled:
+            return
         from scapy.all import sniff
         from .network import get_scapy_interface
 
-        # Capture:
-        # 1. Upstream: all packets sent from target MAC (both IPv4 and IPv6)
-        # 2. Downstream IPv4: all packets returning from router to target IPv4
-        # 3. Downstream IPv6: all intercepted IPv6 packets from router to our MAC
+        # Capture packets associated with this target
         if self.target_mac and self.target_mac not in ("unknown", "Unknown", "-", ""):
             bpf = f"(ether src {self.target_mac}) or (dst host {self.target_ip}) or (ether src {self.router_mac} and ip6 and ether dst {self.my_mac})"
         else:
@@ -141,11 +159,46 @@ class TrafficShaper:
                     break
 
     def _on_packet(self, pkt):
-        """Queue captured packet for rate-limited forwarding."""
+        """Queue captured packet for rate-limited forwarding after strictly discarding host's own packets."""
         try:
+            from scapy.all import Ether, IP
+            from scapy.layers.inet6 import IPv6
+            from .network import get_all_local_ips_and_macs, get_all_local_ipv6_addrs
+
+            if Ether not in pkt:
+                return
+
+            local_ips, local_macs = get_all_local_ips_and_macs()
+            local_ipv6 = get_all_local_ipv6_addrs()
+
+            pkt_src_mac = pkt[Ether].src.lower()
+            pkt_dst_mac = pkt[Ether].dst.lower()
+
+            # Host's own outgoing packets must never be queued
+            if pkt_src_mac == self.my_mac or pkt_src_mac in local_macs:
+                return
+
+            # Exclude packets where source or destination IP belongs to the host machine
+            if IP in pkt:
+                if pkt[IP].src in local_ips or pkt[IP].dst in local_ips:
+                    return
+
+            if IPv6 in pkt:
+                src6 = pkt[IPv6].src.lower()
+                dst6 = pkt[IPv6].dst.lower()
+                if src6 in local_ipv6 or dst6 in local_ipv6:
+                    return
+
+                # If packet comes from router, only queue if destination matches target's known IPv6
+                if pkt_src_mac == self.router_mac:
+                    if dst6 not in self.observed_ipv6_addrs and (not self.target_ipv6_ll or dst6 != self.target_ipv6_ll):
+                        return
+
             self._pkt_queue.put_nowait(pkt)
         except queue.Full:
             pass  # Drop when queue full (congestion control)
+        except Exception:
+            pass
 
     def _forwarder(self):
         """Dequeue packets, apply token-bucket limit, then forward with dual-stack IPv4/IPv6 support."""
@@ -154,10 +207,6 @@ class TrafficShaper:
             from scapy.layers.inet6 import IPv6
             from .network import get_scapy_interface
             npf_iface = get_scapy_interface(self.interface)
-
-            target_mac_lower = (self.target_mac or "").lower()
-            router_mac_lower = (self.router_mac or "").lower()
-            my_mac_lower = (self.my_mac or "").lower()
 
             while not self.stop_event.is_set():
                 try:
@@ -172,16 +221,19 @@ class TrafficShaper:
                 pkt_dst_mac = pkt[Ether].dst.lower()
 
                 # Avoid looping our own forwarded packets
-                if pkt_src_mac == my_mac_lower:
+                if pkt_src_mac == self.my_mac:
                     continue
 
                 # Dynamically learn target's outbound IPv6 addresses
-                if IPv6 in pkt and pkt_src_mac == target_mac_lower:
+                if IPv6 in pkt and pkt_src_mac == self.target_mac:
                     self.observed_ipv6_addrs.add(pkt[IPv6].src.lower())
 
-                # Classify stream direction:
-                is_upstream = (pkt_src_mac == target_mac_lower) or (IP in pkt and pkt[IP].src == self.target_ip)
-                is_downstream = (IP in pkt and pkt[IP].dst == self.target_ip) or (IPv6 in pkt and pkt[IPv6].dst.lower() in self.observed_ipv6_addrs) or (pkt_src_mac == router_mac_lower and pkt_dst_mac == my_mac_lower)
+                # Classify stream direction strictly:
+                is_upstream = (pkt_src_mac == self.target_mac) or (IP in pkt and pkt[IP].src == self.target_ip)
+                is_downstream = (
+                    (IP in pkt and pkt[IP].dst == self.target_ip)
+                    or (IPv6 in pkt and (pkt[IPv6].dst.lower() in self.observed_ipv6_addrs or (self.target_ipv6_ll and pkt[IPv6].dst.lower() == self.target_ipv6_ll)))
+                )
 
                 if not is_upstream and not is_downstream:
                     continue

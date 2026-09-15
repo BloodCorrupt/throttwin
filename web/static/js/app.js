@@ -1289,7 +1289,11 @@ class ThrottwinApp {
             let whitelisted = [];
 
             if (sess.mode === "blacklist") {
-                targets = selectedDevices.filter(d => !globalWlMacs.has((d.mac || '').toLowerCase()));
+                targets = selectedDevices.filter(d => {
+                    const mac = (d.mac || '').toLowerCase();
+                    const isGw = (d.ip === sess.router_ip);
+                    return !isGw && !globalWlMacs.has(mac);
+                });
                 whitelisted = sess.devices.filter(d => globalWlMacs.has((d.mac || '').toLowerCase()));
                 if (!targets.length) {
                     this.showToast('Please select at least one device to throttle.', 'error');
@@ -1301,6 +1305,7 @@ class ThrottwinApp {
                     ...selectedDevices.map(d => (d.mac || '').toLowerCase()).filter(Boolean)
                 ]);
                 const safeIps = new Set(selectedDevices.map(d => d.ip).filter(ip => ip && ip !== '-'));
+                if (sess.router_ip) safeIps.add(sess.router_ip);
 
                 whitelisted = sess.devices.filter(d => {
                     const mac = (d.mac || '').toLowerCase();
@@ -1308,7 +1313,8 @@ class ThrottwinApp {
                 });
                 targets = sess.devices.filter(d => {
                     const mac = (d.mac || '').toLowerCase();
-                    return !((mac && safeMacs.has(mac)) || safeIps.has(d.ip));
+                    const isGw = (d.ip === sess.router_ip);
+                    return !isGw && !((mac && safeMacs.has(mac)) || safeIps.has(d.ip));
                 });
             }
 

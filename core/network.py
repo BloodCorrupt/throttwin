@@ -67,6 +67,48 @@ def get_interface_ip_and_mac(iface_name):
     return ip, mac
 
 
+def get_all_local_ips_and_macs():
+    """
+    Return sets of (all_ips, all_macs) belonging to the host machine across all network interfaces.
+    Always includes 127.0.0.1.
+    """
+    all_ips = {"127.0.0.1"}
+    all_macs = set()
+    try:
+        addrs = psutil.net_if_addrs()
+        for iface_name, addr_list in addrs.items():
+            for a in addr_list:
+                if a.family.name == "AF_INET" and a.address:
+                    if not a.address.startswith("169.254"):
+                        all_ips.add(a.address)
+                elif a.family.name in ("AF_LINK", "AF_PACKET") and a.address:
+                    mac_clean = a.address.lower().replace("-", ":")
+                    if mac_clean not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+                        all_macs.add(mac_clean)
+    except Exception:
+        pass
+    return all_ips, all_macs
+
+
+def get_all_local_ipv6_addrs():
+    """
+    Return set of all normalized IPv6 addresses (link-local, SLAAC, temporary, loopback)
+    assigned to any interface on the host machine.
+    """
+    all_ipv6 = {"::1"}
+    try:
+        addrs = psutil.net_if_addrs()
+        for iface_name, addr_list in addrs.items():
+            for a in addr_list:
+                if "INET6" in a.family.name and a.address:
+                    clean = a.address.split("%")[0].lower().strip()
+                    if clean:
+                        all_ipv6.add(clean)
+    except Exception:
+        pass
+    return all_ipv6
+
+
 def mac_to_ipv6_ll(mac):
     """
     Convert a MAC address into its standard EUI-64 link-local IPv6 address (fe80::...).

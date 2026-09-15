@@ -16,7 +16,7 @@ import ipaddress
 
 from .network import (
     get_interfaces, get_active_interfaces, get_default_gateway, get_scapy_interface,
-    get_interface_ip_and_mac, resolve_mac_from_arp_cache
+    get_interface_ip_and_mac, resolve_mac_from_arp_cache, get_all_local_ips_and_macs
 )
 from .scanner import arp_scan, merge_devices, device_sort_key
 from .spoof import arp_spoof_loop, get_router_mac, get_my_mac
@@ -255,23 +255,49 @@ class InterfaceSession:
             self.operational_mode = mode
             self.limit_mbps = float(limit_mbps)
 
-            global_wl_macs = {m.lower() for m in get_predefined_whitelist().keys()}
+            all_host_ips, all_host_macs = get_all_local_ips_and_macs()
+            my_ip, my_mac = get_interface_ip_and_mac(self.interface)
+
+            global_wl_macs = {m.lower().replace("-", ":") for m in get_predefined_whitelist().keys()}
             safe_macs = set(global_wl_macs)
+            safe_macs.update(all_host_macs)
+            if my_mac:
+                safe_macs.add(my_mac.lower().replace("-", ":"))
+
             raw_wl = list(whitelisted or [])
             for dev in raw_wl:
                 if isinstance(dev, dict) and dev.get("mac"):
-                    safe_macs.add(dev["mac"].lower())
-            safe_ips = {
-                (dev.get("ip") if isinstance(dev, dict) else dev)
-                for dev in raw_wl
-                if (dev.get("ip") if isinstance(dev, dict) else dev)
-            }
+                    safe_macs.add(dev["mac"].lower().replace("-", ":"))
+
+            safe_ips = set(all_host_ips)
+            if my_ip:
+                safe_ips.add(my_ip)
+            if self.router_ip:
+                safe_ips.add(self.router_ip)
+
+            for dev in raw_wl:
+                ip_val = dev.get("ip") if isinstance(dev, dict) else dev
+                if ip_val and ip_val != "-":
+                    safe_ips.add(ip_val)
+
+            # Resolve router MAC
+            router_mac = get_router_mac(self.router_ip, self.interface)
+            if router_mac:
+                safe_macs.add(router_mac.lower().replace("-", ":"))
 
             filtered = []
             for tgt in targets:
                 tgt_ip = tgt.get("ip") if isinstance(tgt, dict) else tgt
-                tgt_mac = (tgt.get("mac") if isinstance(tgt, dict) else "").lower()
-                if (tgt_mac and tgt_mac in safe_macs) or (tgt_ip and tgt_ip in safe_ips):
+                tgt_mac = (tgt.get("mac") if isinstance(tgt, dict) else "").lower().replace("-", ":")
+                if (
+                    not tgt_ip
+                    or tgt_ip in safe_ips
+                    or tgt_mac in safe_macs
+                    or tgt_ip in all_host_ips
+                    or tgt_mac in all_host_macs
+                    or tgt_ip == self.router_ip
+                    or (router_mac and tgt_mac == router_mac.lower().replace("-", ":"))
+                ):
                     continue
                 filtered.append(tgt)
 
@@ -285,8 +311,10 @@ class InterfaceSession:
         try:
             enable_ip_forwarding()
 
-            router_mac = get_router_mac(self.router_ip, self.interface)
-            my_mac = get_my_mac(self.interface)
+            if not router_mac:
+                router_mac = get_router_mac(self.router_ip, self.interface)
+            if not my_mac:
+                my_mac = get_my_mac(self.interface)
 
             if not router_mac:
                 self.status = "IDLE"
@@ -326,6 +354,21 @@ class InterfaceSession:
             return False, str(e)
 
     def _spawn_spoofer(self, target_ip, target_mac, router_mac, my_mac):
+        all_host_ips, all_host_macs = get_all_local_ips_and_macs()
+        t_mac = (target_mac or "").lower().replace("-", ":")
+        r_mac = (router_mac or "").lower().replace("-", ":")
+        m_mac = (my_mac or "").lower().replace("-", ":")
+
+        if (
+            not target_ip
+            or target_ip in ("-", "0.0.0.0", "127.0.0.1", self.router_ip)
+            or target_ip in all_host_ips
+            or t_mac in all_host_macs
+            or t_mac in (r_mac, m_mac)
+        ):
+            log.warning(f"[{self.session_id}] Refusing to spawn spoofer for host/gateway: {target_ip} ({target_mac})")
+            return
+
         evt = threading.Event()
         t = threading.Thread(
             target=arp_spoof_loop,
@@ -446,22 +489,8 @@ class InterfaceSession:
         Actively scans the local network every 8-10s. Any newly arriving device
         outside the whitelist is automatically throttled and spoofed on the fly
         without session interruption.
+        Strictly protects the host machine and default gateway from being throttled.
         """
-        safe_macs = {
-            (dev.get("mac") if isinstance(dev, dict) else "").lower()
-            for dev in self.whitelisted
-            if isinstance(dev, dict) and dev.get("mac")
-        }
-        for pmac in get_predefined_whitelist().keys():
-            safe_macs.add(pmac.lower())
-
-        safe_ips = {
-            (dev.get("ip") if isinstance(dev, dict) else dev)
-            for dev in self.whitelisted
-            if (dev.get("ip") if isinstance(dev, dict) else dev) and
-               (dev.get("ip") if isinstance(dev, dict) else dev) != "-"
-        }
-
         while self.stop_event and not self.stop_event.is_set():
             if self.stop_event.wait(8):
                 break
@@ -474,8 +503,34 @@ class InterfaceSession:
                 log.warning(f"[{self.session_id}] Whitelist watcher scan error: {e}")
                 continue
 
+            all_host_ips, all_host_macs = get_all_local_ips_and_macs()
             my_ip, my_mac = get_interface_ip_and_mac(self.interface)
             router_mac = resolve_mac_from_arp_cache(self.router_ip, interface_ip=my_ip) or get_router_mac(self.router_ip, self.interface)
+
+            safe_macs = {
+                (dev.get("mac") if isinstance(dev, dict) else "").lower().replace("-", ":")
+                for dev in self.whitelisted
+                if isinstance(dev, dict) and dev.get("mac")
+            }
+            safe_macs.update(all_host_macs)
+            for pmac in get_predefined_whitelist().keys():
+                safe_macs.add(pmac.lower().replace("-", ":"))
+            if router_mac:
+                safe_macs.add(router_mac.lower().replace("-", ":"))
+            if my_mac:
+                safe_macs.add(my_mac.lower().replace("-", ":"))
+
+            safe_ips = {
+                (dev.get("ip") if isinstance(dev, dict) else dev)
+                for dev in self.whitelisted
+                if (dev.get("ip") if isinstance(dev, dict) else dev) and
+                   (dev.get("ip") if isinstance(dev, dict) else dev) != "-"
+            }
+            safe_ips.update(all_host_ips)
+            if self.router_ip:
+                safe_ips.add(self.router_ip)
+            if my_ip:
+                safe_ips.add(my_ip)
 
             with self.lock:
                 self.devices = merge_devices(
@@ -490,12 +545,20 @@ class InterfaceSession:
                     break
 
                 dev_ip = dev.get("ip")
-                dev_mac = (dev.get("mac") or "").lower()
+                dev_mac = (dev.get("mac") or "").lower().replace("-", ":")
 
-                if not dev_ip or dev_ip == "-":
+                if not dev_ip or dev_ip in ("-", "0.0.0.0", "127.0.0.1", self.router_ip):
                     continue
 
-                if (dev_mac and dev_mac in safe_macs) or (dev_ip in safe_ips):
+                if (
+                    dev_mac in safe_macs
+                    or dev_ip in safe_ips
+                    or dev_ip in all_host_ips
+                    or dev_mac in all_host_macs
+                    or (my_ip and dev_ip == my_ip)
+                    or (my_mac and dev_mac == my_mac.lower().replace("-", ":"))
+                    or (router_mac and dev_mac == router_mac.lower().replace("-", ":"))
+                ):
                     if dev_mac and dev_mac in safe_macs and dev_ip not in safe_ips:
                         safe_ips.add(dev_ip)
                     continue
