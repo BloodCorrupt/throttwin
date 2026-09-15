@@ -269,6 +269,10 @@ def _get_arp_cache(interface_ip=None, subnet_net=None, router_ip=None, my_mac=No
     my_mac_clean = (my_mac or "").lower().replace("-", ":")
     router_mac_clean = (router_mac or "").lower().replace("-", ":")
 
+    from .network import get_all_local_ips_and_macs
+    all_host_ips, all_host_macs = get_all_local_ips_and_macs()
+    all_host_macs_clean = {m.lower().replace("-", ":") for m in all_host_macs}
+
     try:
         cmd = f"arp -a -N {interface_ip}" if interface_ip else "arp -a"
         res = subprocess.run(cmd, capture_output=True, text=True, shell=True)
@@ -299,6 +303,8 @@ def _get_arp_cache(interface_ip=None, subnet_net=None, router_ip=None, my_mac=No
                         and ip != "255.255.255.255"
                         and ip != router_ip
                         and ip != interface_ip
+                        and ip not in all_host_ips
+                        and mac not in all_host_macs_clean
                         and (not my_mac_clean or mac != my_mac_clean)
                         and (not router_mac_clean or mac != router_mac_clean)):
                     if subnet_net:
@@ -434,12 +440,18 @@ def merge_devices(existing, new_devices, subnet_net=None, my_mac=None, my_ip=Non
     my_mac_clean = (my_mac or "").lower().replace("-", ":")
     router_mac_clean = (router_mac or "").lower().replace("-", ":")
 
+    from .network import get_all_local_ips_and_macs
+    all_host_ips, all_host_macs = get_all_local_ips_and_macs()
+    all_host_macs_clean = {m.lower().replace("-", ":") for m in all_host_macs}
+
     def _is_valid(d):
         if not isinstance(d, dict):
             return False
         ip = d.get("ip")
         mac = (d.get("mac") or "").lower().replace("-", ":")
 
+        if ip in all_host_ips or mac in all_host_macs_clean:
+            return False
         if my_ip and ip == my_ip:
             return False
         if router_ip and ip == router_ip:

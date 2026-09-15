@@ -355,6 +355,7 @@ class InterfaceSession:
 
     def _spawn_spoofer(self, target_ip, target_mac, router_mac, my_mac):
         all_host_ips, all_host_macs = get_all_local_ips_and_macs()
+        global_wl_macs = {m.lower().replace("-", ":") for m in get_predefined_whitelist().keys()}
         t_mac = (target_mac or "").lower().replace("-", ":")
         r_mac = (router_mac or "").lower().replace("-", ":")
         m_mac = (my_mac or "").lower().replace("-", ":")
@@ -364,9 +365,10 @@ class InterfaceSession:
             or target_ip in ("-", "0.0.0.0", "127.0.0.1", self.router_ip)
             or target_ip in all_host_ips
             or t_mac in all_host_macs
+            or t_mac in global_wl_macs
             or t_mac in (r_mac, m_mac)
         ):
-            log.warning(f"[{self.session_id}] Refusing to spawn spoofer for host/gateway: {target_ip} ({target_mac})")
+            log.warning(f"[{self.session_id}] Refusing to spawn spoofer for host/gateway/whitelist: {target_ip} ({target_mac})")
             return
 
         evt = threading.Event()

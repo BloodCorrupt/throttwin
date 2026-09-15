@@ -80,17 +80,24 @@ class TrafficShaper:
 
         from .network import get_all_local_ips_and_macs, get_all_local_ipv6_addrs, mac_to_ipv6_ll
         all_ips, all_macs = get_all_local_ips_and_macs()
+        self.local_ips = set(all_ips)
+        self.local_macs = {m.lower().replace("-", ":") for m in all_macs}
+        self.local_ipv6 = get_all_local_ipv6_addrs()
         self.target_ipv6_ll = mac_to_ipv6_ll(self.target_mac).lower() if self.target_mac else ""
+
+        from .config import get_predefined_whitelist
+        global_wl_macs = {m.lower().replace("-", ":") for m in get_predefined_whitelist().keys()}
 
         if (
             not self.target_ip
             or self.target_ip in ("-", "0.0.0.0", "127.0.0.1", self.router_ip)
-            or self.target_ip in all_ips
-            or self.target_mac in all_macs
+            or self.target_ip in self.local_ips
+            or self.target_mac in self.local_macs
+            or self.target_mac in global_wl_macs
             or self.target_mac in (self.router_mac, self.my_mac)
         ):
             self._disabled = True
-            log.warning(f"TrafficShaper disabled for self/gateway: {self.target_ip} ({self.target_mac})")
+            log.warning(f"TrafficShaper disabled for self/gateway/whitelist: {self.target_ip} ({self.target_mac})")
         else:
             self._disabled = False
 
@@ -131,15 +138,15 @@ class TrafficShaper:
         return self.speed_bps / 1_000_000
 
     def _sniffer(self):
-        """Capture both IPv4 and IPv6 packets from the intercepted target on our interface with auto-recovery."""
+        """Capture packets strictly from/to the intercepted target without over-matching host's traffic."""
         if self._disabled:
             return
         from scapy.all import sniff
         from .network import get_scapy_interface
 
-        # Capture packets associated with this target
+        # Capture packets associated with this target strictly
         if self.target_mac and self.target_mac not in ("unknown", "Unknown", "-", ""):
-            bpf = f"(ether src {self.target_mac}) or (dst host {self.target_ip}) or (ether src {self.router_mac} and ip6 and ether dst {self.my_mac})"
+            bpf = f"(ether src {self.target_mac}) or (dst host {self.target_ip})"
         else:
             bpf = f"src host {self.target_ip} or dst host {self.target_ip}"
 
@@ -163,36 +170,27 @@ class TrafficShaper:
         try:
             from scapy.all import Ether, IP
             from scapy.layers.inet6 import IPv6
-            from .network import get_all_local_ips_and_macs, get_all_local_ipv6_addrs
 
             if Ether not in pkt:
                 return
-
-            local_ips, local_macs = get_all_local_ips_and_macs()
-            local_ipv6 = get_all_local_ipv6_addrs()
 
             pkt_src_mac = pkt[Ether].src.lower()
             pkt_dst_mac = pkt[Ether].dst.lower()
 
             # Host's own outgoing packets must never be queued
-            if pkt_src_mac == self.my_mac or pkt_src_mac in local_macs:
+            if pkt_src_mac == self.my_mac or pkt_src_mac in self.local_macs:
                 return
 
             # Exclude packets where source or destination IP belongs to the host machine
             if IP in pkt:
-                if pkt[IP].src in local_ips or pkt[IP].dst in local_ips:
+                if pkt[IP].src in self.local_ips or pkt[IP].dst in self.local_ips:
                     return
 
             if IPv6 in pkt:
                 src6 = pkt[IPv6].src.lower()
                 dst6 = pkt[IPv6].dst.lower()
-                if src6 in local_ipv6 or dst6 in local_ipv6:
+                if src6 in self.local_ipv6 or dst6 in self.local_ipv6:
                     return
-
-                # If packet comes from router, only queue if destination matches target's known IPv6
-                if pkt_src_mac == self.router_mac:
-                    if dst6 not in self.observed_ipv6_addrs and (not self.target_ipv6_ll or dst6 != self.target_ipv6_ll):
-                        return
 
             self._pkt_queue.put_nowait(pkt)
         except queue.Full:
@@ -268,7 +266,7 @@ class TrafficShaper:
                         sendp(fwd, iface=npf_iface, verbose=0)
                 except Exception as e:
                     log.debug(f"Forward error (interface reconnecting?): {e}")
-                    npf_iface = get_scapy_interface(self.interface)
+                    npf_iface = get_scapy_interface(interface)
 
         except Exception as e:
             log.debug(f"Forwarder error for {self.target_ip}: {e}")
@@ -276,21 +274,23 @@ class TrafficShaper:
 
 def enable_ip_forwarding():
     """
-    Enable dual-stack IPv4 and IPv6 forwarding on Windows via registry + netsh.
-    Required so that intercepted packets can be forwarded.
+    Enable IPv4 forwarding on Windows via registry + netsh.
+    Preserves IPv6 host mode (enabling IPv6 forwarding on Windows turns it into a router,
+    which disables RA processing and drops the default IPv6 route and DNS).
     """
     try:
         import subprocess
-        # Enable IPv4 & IPv6 routing via netsh
+        # Enable IPv4 routing via netsh
         subprocess.run(
             "netsh int ipv4 set global forwarding=enabled",
             shell=True, capture_output=True
         )
+        # Explicitly ensure IPv6 remains in host mode so default gateway (::/0) and DNS work
         subprocess.run(
-            "netsh int ipv6 set global forwarding=enabled",
+            "netsh int ipv6 set global forwarding=disabled",
             shell=True, capture_output=True
         )
-        # Also set via registry for persistence across reboots
+        # Set IPv4 forwarding in registry for persistence
         subprocess.run(
             r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" '
             r'/v IPEnableRouter /t REG_DWORD /d 1 /f',
@@ -298,16 +298,16 @@ def enable_ip_forwarding():
         )
         subprocess.run(
             r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" '
-            r'/v IPEnableRouter /t REG_DWORD /d 1 /f',
+            r'/v IPEnableRouter /t REG_DWORD /d 0 /f',
             shell=True, capture_output=True
         )
-        log.info("Dual-stack IPv4/IPv6 forwarding enabled.")
+        log.info("IPv4 forwarding enabled (IPv6 client mode preserved).")
     except Exception as e:
-        log.warning(f"Could not enable IP forwarding: {e}")
+        log.warning(f"Could not configure IP forwarding: {e}")
 
 
 def disable_ip_forwarding():
-    """Disable dual-stack IP forwarding after session ends."""
+    """Disable IP forwarding after session ends."""
     try:
         import subprocess
         subprocess.run(
@@ -328,7 +328,7 @@ def disable_ip_forwarding():
             r'/v IPEnableRouter /t REG_DWORD /d 0 /f',
             shell=True, capture_output=True
         )
-        log.info("Dual-stack IPv4/IPv6 forwarding disabled.")
+        log.info("IP forwarding disabled.")
     except Exception as e:
         log.warning(f"Could not disable IP forwarding: {e}")
 

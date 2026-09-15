@@ -878,8 +878,29 @@ class ThrottwinApp {
             (sess.targets || []).map(t => (typeof t === 'string' ? t : t.ip))
         );
 
-        const globalWl = this.rules.whitelist || {};
-        const globalBl = this.rules.blacklist || {};
+        const globalWl = {};
+        if (Array.isArray(this.rules.whitelist)) {
+            this.rules.whitelist.forEach(item => {
+                const mac = (typeof item === 'string' ? item : (item.mac || '')).toLowerCase();
+                if (mac) globalWl[mac] = item.name || '';
+            });
+        } else if (this.rules.whitelist && typeof this.rules.whitelist === 'object') {
+            Object.entries(this.rules.whitelist).forEach(([k, v]) => {
+                globalWl[k.toLowerCase()] = v || '';
+            });
+        }
+
+        const globalBl = {};
+        if (Array.isArray(this.rules.blacklist)) {
+            this.rules.blacklist.forEach(item => {
+                const mac = (typeof item === 'string' ? item : (item.mac || '')).toLowerCase();
+                if (mac) globalBl[mac] = item.name || '';
+            });
+        } else if (this.rules.blacklist && typeof this.rules.blacklist === 'object') {
+            Object.entries(this.rules.blacklist).forEach(([k, v]) => {
+                globalBl[k.toLowerCase()] = v || '';
+            });
+        }
 
         const isRunning = sess.status === "RUNNING";
         tbody.innerHTML = '';
@@ -1283,7 +1304,11 @@ class ThrottwinApp {
             }
         } else if (sess.status !== "STOPPING") {
             const selectedDevices = sess.devices.filter(d => sess.selectedIps.has(d.ip));
-            const globalWlMacs = new Set(Object.keys(this.rules.whitelist || {}).map(m => m.toLowerCase()));
+            const globalWlMacs = new Set(
+                Array.isArray(this.rules.whitelist)
+                    ? this.rules.whitelist.map(item => (typeof item === 'string' ? item : item.mac || '').toLowerCase()).filter(Boolean)
+                    : Object.keys(this.rules.whitelist || {}).map(m => m.toLowerCase())
+            );
 
             let targets = [];
             let whitelisted = [];
