@@ -149,6 +149,7 @@ Total: 0.94 Mbps  |  Transferred: 4.2 MB  |  Uptime: 00:04:12  |  Ctrl+C to stop
 
 | Feature | Description |
 |---------|-------------|
+| **Multi-Interface Sessions** | Run simultaneous, independent throttling sessions across multiple network adapters (e.g. Ethernet + Wi-Fi) with tabbed switching |
 | Live Dashboard | Real-time throughput chart, target speed, total data throttled |
 | Network Scanner | ARP sweep + Windows ARP cache discovery with vendor lookup |
 | Hot-toggle | Add/remove targets from a running session without stopping |

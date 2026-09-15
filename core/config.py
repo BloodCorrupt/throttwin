@@ -25,7 +25,21 @@ def _ensure_dir():
 
 def save_config(interface, router_ip, mode, targets, limit_mbps, whitelisted=None):
     _ensure_dir()
-    config = {
+    existing = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                existing = json.load(f) or {}
+        except Exception:
+            existing = {}
+
+    sessions = existing.get("sessions", {})
+    if "interface" in existing and "sessions" not in existing:
+        old_iface = existing.get("interface")
+        if old_iface:
+            sessions[old_iface] = dict(existing)
+
+    sess_config = {
         "interface":        interface,
         "router_ip":        router_ip,
         "operational_mode": mode,
@@ -33,34 +47,73 @@ def save_config(interface, router_ip, mode, targets, limit_mbps, whitelisted=Non
         "limit_mbps":       limit_mbps,
     }
     if whitelisted is not None:
-        config["whitelisted"] = whitelisted
+        sess_config["whitelisted"] = whitelisted
+
+    if interface:
+        sessions[interface] = sess_config
+
+    full_config = {
+        "interface":        interface,
+        "router_ip":        router_ip,
+        "operational_mode": mode,
+        "targets":          targets,
+        "limit_mbps":       limit_mbps,
+        "whitelisted":      whitelisted or [],
+        "sessions":         sessions
+    }
+
     try:
         with open(CONFIG_FILE, "w") as f:
-            json.dump(config, f, indent=4)
+            json.dump(full_config, f, indent=4)
     except Exception as e:
         log.warning(f"Failed to save config: {e}")
 
 
-def load_config():
+def load_config(interface=None):
     if not os.path.exists(CONFIG_FILE):
         return None
     try:
         with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        if not data:
+            return None
+
+        sessions = data.get("sessions")
+        if sessions and isinstance(sessions, dict):
+            if interface and interface in sessions:
+                return sessions[interface]
+            elif interface:
+                return None
+            return data
+
+        if interface and data.get("interface") != interface:
+            return None
+
+        return data
     except Exception as e:
         log.warning(f"Failed to load config: {e}")
         return None
 
 
-def clear_saved_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
+def clear_saved_config(interface=None):
+    if not os.path.exists(CONFIG_FILE):
+        return True
+    try:
+        if not interface:
             os.remove(CONFIG_FILE)
             return True
-        except Exception as e:
-            log.warning(f"Failed to clear config: {e}")
-            return False
-    return True
+        with open(CONFIG_FILE, "r") as f:
+            data = json.load(f) or {}
+        sessions = data.get("sessions", {})
+        if interface in sessions:
+            del sessions[interface]
+            data["sessions"] = sessions
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(data, f, indent=4)
+        return True
+    except Exception as e:
+        log.warning(f"Failed to clear config: {e}")
+        return False
 
 
 def match_saved_config(config, devices):

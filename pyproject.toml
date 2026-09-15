@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "throttwin"
-version = "2.0.0"
+version = "2.1.0"
 description = "A Windows tool to limit the bandwidth of any device on your local network, no router access required."
 readme = "README.md"
 license = {text = "MIT"}

@@ -1153,3 +1153,169 @@ input:checked + .slider:before {
     color: var(--text-muted);
     white-space: nowrap;
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   MULTI-INTERFACE SESSION TAB BAR
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.session-tabs-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0 16px 0;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 20px;
+    overflow-x: auto;
+}
+
+.session-tabs-list {
+    display: flex;
+    gap: 8px;
+    flex: 1;
+    overflow-x: auto;
+    padding: 2px 0;
+}
+
+.session-tab {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-radius: var(--radius-md);
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.25s ease;
+    white-space: nowrap;
+    position: relative;
+    min-width: 180px;
+    backdrop-filter: blur(12px);
+    font-family: var(--font-main);
+    font-size: 0.85rem;
+    animation: tabSlideIn 0.3s ease;
+}
+
+@keyframes tabSlideIn {
+    from { opacity: 0; transform: translateY(-8px) scale(0.95); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.session-tab:hover {
+    background: var(--card-hover);
+    border-color: rgba(255, 255, 255, 0.12);
+    transform: translateY(-1px);
+}
+
+.session-tab.active {
+    background: rgba(0, 242, 254, 0.08);
+    border-color: rgba(0, 242, 254, 0.35);
+    color: var(--text-primary);
+    box-shadow: 0 0 20px rgba(0, 242, 254, 0.12), inset 0 1px 0 rgba(0, 242, 254, 0.15);
+}
+
+.session-tab-status {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: all 0.3s ease;
+}
+
+.session-tab-status.idle {
+    background: var(--text-muted);
+    box-shadow: 0 0 6px rgba(100, 116, 139, 0.3);
+}
+
+.session-tab-status.running {
+    background: var(--accent-emerald);
+    box-shadow: 0 0 10px rgba(0, 245, 160, 0.5);
+    animation: pulseGreen 1.5s ease-in-out infinite;
+}
+
+@keyframes pulseGreen {
+    0%, 100% { box-shadow: 0 0 6px rgba(0, 245, 160, 0.3); }
+    50% { box-shadow: 0 0 16px rgba(0, 245, 160, 0.7); }
+}
+
+.session-tab-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.session-tab-name {
+    font-weight: 600;
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+}
+
+.session-tab-subnet {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+
+.session-tab-badge {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 6px;
+    margin-left: auto;
+}
+
+.session-tab-badge.idle {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-muted);
+}
+
+.session-tab-badge.running {
+    background: rgba(0, 245, 160, 0.12);
+    color: var(--accent-emerald);
+    border: 1px solid rgba(0, 245, 160, 0.25);
+}
+
+.session-tab-close {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-muted);
+    border-radius: 50%;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: all 0.2s ease;
+    line-height: 1;
+}
+
+.session-tab:hover .session-tab-close {
+    opacity: 1;
+}
+
+.session-tab-close:hover {
+    background: var(--accent-rose);
+    color: white;
+}
+
+.add-session-btn {
+    flex-shrink: 0;
+    border-style: dashed !important;
+    opacity: 0.7;
+    transition: all 0.2s ease;
+}
+
+.add-session-btn:hover {
+    opacity: 1;
+    border-color: var(--accent-cyan) !important;
+    color: var(--accent-cyan);
+}

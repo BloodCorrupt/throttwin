@@ -22,6 +22,16 @@ app.config["SECRET_KEY"] = "throttwin-web-secret"
 engine = ThrottwinEngine()
 
 
+def _sid(data=None):
+    """Extract session_id from request args, JSON body, or use default."""
+    if data and isinstance(data, dict) and data.get("session_id"):
+        return data["session_id"]
+    sid = request.args.get("session_id")
+    if sid:
+        return sid
+    return None  # Will use default session
+
+
 # ─── Pages ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -36,8 +46,15 @@ def sse_stream():
     def event_generator():
         q = engine.subscribe_events()
         try:
-            # Send initial state
-            initial = json.dumps({"type": "init", "state": engine.get_state()})
+            # Send initial state for all sessions
+            all_states = engine.get_all_sessions_state()
+            session_ids = list(all_states.keys())
+            initial = json.dumps({
+                "type": "init",
+                "sessions": all_states,
+                "session_ids": session_ids,
+                "active_session_id": session_ids[0] if session_ids else None
+            })
             yield f"data: {initial}\n\n"
             while True:
                 try:
@@ -55,11 +72,62 @@ def sse_stream():
     })
 
 
+# ─── Sessions Management ──────────────────────────────────────────────────────
+
+@app.route("/api/sessions")
+def get_sessions():
+    """List all interface sessions with their states."""
+    all_states = engine.get_all_sessions_state()
+    return jsonify({
+        "success": True,
+        "sessions": all_states,
+        "session_ids": list(all_states.keys())
+    })
+
+
+@app.route("/api/sessions/create", methods=["POST"])
+def create_session():
+    """Create a new session for an interface."""
+    data = request.get_json(silent=True) or {}
+    interface = data.get("interface")
+    router_ip = data.get("router_ip")
+    if not interface:
+        return jsonify({"success": False, "error": "Interface name required."}), 400
+    session, msg = engine.create_session(interface, router_ip)
+    return jsonify({
+        "success": True,
+        "message": msg,
+        "session": session.get_state(),
+        "sessions": engine.get_all_sessions_state(),
+        "session_ids": list(engine.sessions.keys())
+    })
+
+
+@app.route("/api/sessions/<session_id>/delete", methods=["POST"])
+def delete_session(session_id):
+    """Delete an idle session."""
+    ok, msg = engine.delete_session(session_id)
+    if ok:
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "sessions": engine.get_all_sessions_state(),
+            "session_ids": list(engine.sessions.keys())
+        })
+    return jsonify({"success": False, "error": msg}), 400
+
+
 # ─── Status & Interfaces ───────────────────────────────────────────────────────
 
 @app.route("/api/status")
 def get_status():
-    return jsonify({"success": True, "data": engine.get_state()})
+    sid = _sid()
+    return jsonify({
+        "success": True,
+        "data": engine.get_state(sid),
+        "sessions": engine.get_all_sessions_state(),
+        "session_ids": list(engine.sessions.keys())
+    })
 
 
 @app.route("/api/interfaces")
@@ -72,13 +140,19 @@ def get_interfaces_list():
             "interface":        iface_param,
             "default_gateway":   gw or "192.168.1.1",
         })
+
+    active = engine.get_active_interfaces_full()
+    iface_names = [i["name"] for i in active]
+    default_iface = active[0]["name"] if active else None
+    default_gw = active[0].get("gateway") if active else None
+
     return jsonify({
         "success":           True,
-        "interfaces":        engine.get_interfaces(),
-        "default_interface": engine.current_interface,
-        "default_gateway":   engine.get_default_gateway(),
+        "interfaces":        iface_names,
+        "interfaces_full":   active,
+        "default_interface": default_iface,
+        "default_gateway":   default_gw or engine.get_default_gateway(),
     })
-
 
 
 # ─── Scanning ──────────────────────────────────────────────────────────────────
@@ -86,10 +160,24 @@ def get_interfaces_list():
 @app.route("/api/scan", methods=["POST"])
 def scan_network():
     data   = request.get_json(silent=True) or {}
-    iface  = data.get("interface") or engine.current_interface
-    router = data.get("router_ip") or engine.current_router_ip
-    devs   = engine.scan(interface=iface, router_ip=router)
-    return jsonify({"success": True, "devices": devs, "count": len(devs)})
+    sid    = _sid(data)
+    session = engine.get_session(sid)
+    if not session:
+        return jsonify({"success": False, "error": "No active session found."}), 404
+
+    # Allow overriding interface/router for this scan
+    if data.get("interface"):
+        session.interface = data["interface"]
+    if data.get("router_ip"):
+        session.router_ip = data["router_ip"]
+
+    devs = session.scan()
+    return jsonify({
+        "success": True,
+        "devices": devs,
+        "count": len(devs),
+        "session_id": session.session_id
+    })
 
 
 # ─── Devices ───────────────────────────────────────────────────────────────────
@@ -99,15 +187,24 @@ def add_manual_device():
     data = request.get_json(silent=True) or {}
     ip   = data.get("ip")
     mac  = data.get("mac")
+    sid  = _sid(data)
     if not ip and not mac:
         return jsonify({"success": False, "error": "IP or MAC required."}), 400
-    dev = engine.add_manual_device(ip=ip, mac=mac, vendor=data.get("vendor", "Manual Entry"))
+    session = engine.get_session(sid)
+    if not session:
+        return jsonify({"success": False, "error": "No active session found."}), 404
+    dev = session.add_manual_device(ip=ip, mac=mac, vendor=data.get("vendor", "Manual Entry"))
     return jsonify({"success": True, "device": dev})
 
 
 @app.route("/api/devices/clear", methods=["POST"])
 def clear_devices():
-    ok, msg = engine.clear_cache()
+    data = request.get_json(silent=True) or {}
+    sid = _sid(data)
+    session = engine.get_session(sid)
+    if not session:
+        return jsonify({"success": False, "error": "No active session found."}), 404
+    ok, msg = session.clear_cache()
     if ok:
         return jsonify({"success": True, "message": msg})
     return jsonify({"success": False, "error": msg}), 400
@@ -155,35 +252,65 @@ def delete_rule(category, mac):
 
 @app.route("/api/session/start", methods=["POST"])
 def start_session():
-    data       = request.get_json(silent=True) or {}
-    iface      = data.get("interface")  or engine.current_interface
-    router     = data.get("router_ip")  or engine.current_router_ip
-    mode       = data.get("mode", "blacklist")
-    targets    = data.get("targets", [])
-    whitelisted = data.get("whitelisted", [])
-    limit_mbps = float(data.get("limit_mbps", 1.0))
+    data        = request.get_json(silent=True) or {}
+    sid         = _sid(data) or data.get("interface")
+    session     = engine.get_session(sid)
 
-    if not iface or not router:
-        return jsonify({"success": False, "error": "Interface and router IP required."}), 400
+    if not session:
+        # Auto-create session for the requested interface
+        iface = data.get("interface")
+        router = data.get("router_ip")
+        if iface:
+            session, _ = engine.create_session(iface, router)
+        else:
+            return jsonify({"success": False, "error": "No session found. Specify an interface."}), 400
+
+    mode        = data.get("mode", "blacklist")
+    targets     = data.get("targets", [])
+    whitelisted = data.get("whitelisted", [])
+    limit_mbps  = float(data.get("limit_mbps", 1.0))
+
+    if data.get("router_ip"):
+        session.router_ip = data["router_ip"]
+
     if mode == "blacklist" and not targets:
         return jsonify({"success": False, "error": "Select at least one target in blacklist mode."}), 400
 
-    ok, msg = engine.start_session(iface, router, mode, targets, limit_mbps, whitelisted)
+    ok, msg = session.start_session(mode, targets, limit_mbps, whitelisted)
     if ok:
-        return jsonify({"success": True, "message": msg, "state": engine.get_state()})
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "state": session.get_state(),
+            "sessions": engine.get_all_sessions_state()
+        })
     return jsonify({"success": False, "error": msg}), 500
 
 
 @app.route("/api/session/stop", methods=["POST"])
 def stop_session():
-    ok, msg = engine.stop_session()
-    return jsonify({"success": ok, "message": msg, "state": engine.get_state()})
+    data = request.get_json(silent=True) or {}
+    sid = _sid(data)
+    session = engine.get_session(sid)
+    if not session:
+        return jsonify({"success": False, "error": "No session found."}), 404
+    ok, msg = session.stop_session()
+    return jsonify({
+        "success": ok,
+        "message": msg,
+        "state": session.get_state(),
+        "sessions": engine.get_all_sessions_state()
+    })
 
 
 @app.route("/api/session/limit", methods=["POST"])
 def update_limit():
     data = request.get_json(silent=True) or {}
-    lim  = data.get("limit_mbps")
+    sid = _sid(data)
+    session = engine.get_session(sid)
+    if not session:
+        return jsonify({"success": False, "error": "No session found."}), 404
+    lim = data.get("limit_mbps")
     if lim is None:
         return jsonify({"success": False, "error": "limit_mbps required."}), 400
     try:
@@ -193,28 +320,37 @@ def update_limit():
     except ValueError:
         return jsonify({"success": False, "error": "Invalid limit_mbps."}), 400
 
-    ok, msg = engine.update_limit(lim)
+    ok, msg = session.update_limit(lim)
     return jsonify({"success": ok, "message": msg, "limit_mbps": lim})
 
 
 @app.route("/api/target/toggle", methods=["POST"])
 def toggle_target():
-    data           = request.get_json(silent=True) or {}
-    ip             = data.get("ip")
+    data            = request.get_json(silent=True) or {}
+    ip              = data.get("ip")
     should_throttle = data.get("should_throttle")
+    sid             = _sid(data)
     if not ip or should_throttle is None:
         return jsonify({"success": False, "error": "ip and should_throttle required."}), 400
-    ok, msg = engine.toggle_target(ip, bool(should_throttle))
+    session = engine.get_session(sid)
+    if not session:
+        return jsonify({"success": False, "error": "No session found."}), 404
+    ok, msg = session.toggle_target(ip, bool(should_throttle))
     if ok:
-        return jsonify({"success": True, "message": msg, "state": engine.get_state()})
+        return jsonify({"success": True, "message": msg, "state": session.get_state()})
     return jsonify({"success": False, "error": msg}), 400
 
 
 @app.route("/api/telemetry")
 def get_telemetry():
-    state = engine.get_state()
+    sid = _sid()
+    session = engine.get_session(sid)
+    if not session:
+        return jsonify({"success": True, "status": "IDLE", "telemetry": []})
+    state = session.get_state()
     return jsonify({
         "success":          True,
+        "session_id":       session.session_id,
         "status":           state["status"],
         "uptime":           state["uptime"],
         "total_speed_kbps": state["total_speed_kbps"],
@@ -230,11 +366,12 @@ def get_telemetry():
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     cfg = load_config() or {}
+    session = engine.get_session()
     return jsonify({
         "success": True,
         "settings": {
-            "interface": cfg.get("interface") or engine.current_interface,
-            "router_ip": cfg.get("router_ip") or engine.current_router_ip,
+            "interface": cfg.get("interface") or (session.interface if session else None),
+            "router_ip": cfg.get("router_ip") or (session.router_ip if session else None),
             "default_limit": cfg.get("limit_mbps", 1.0),
         }
     })
@@ -246,25 +383,27 @@ def save_settings_api():
     iface = data.get("interface")
     router = data.get("router_ip")
     limit = float(data.get("default_limit") or data.get("limit_mbps") or 1.0)
+    sid = _sid(data) or iface
 
-    if iface:
-        engine.current_interface = iface
-    if router:
-        engine.current_router_ip = router
-    if limit:
-        engine.limit_mbps = limit
+    session = engine.get_session(sid)
+    if session:
+        if iface:
+            session.interface = iface
+        if router:
+            session.router_ip = router
+        if limit:
+            session.limit_mbps = limit
 
     save_config(
-        interface=engine.current_interface,
-        router_ip=engine.current_router_ip,
-        mode=engine.operational_mode,
-        targets=engine.targets,
-        limit_mbps=engine.limit_mbps,
-        whitelisted=engine.whitelisted
+        interface=iface or (session.interface if session else ""),
+        router_ip=router or (session.router_ip if session else ""),
+        mode=session.operational_mode if session else "blacklist",
+        targets=session.targets if session else [],
+        limit_mbps=limit,
+        whitelisted=session.whitelisted if session else []
     )
     return jsonify({"success": True, "message": "Settings saved successfully."})
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
-

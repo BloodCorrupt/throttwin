@@ -28,7 +28,7 @@
                 </div>
                 <div class="brand-text">
                     <h1>THROTTWIN <span class="brand-plus">WINDOWS</span></h1>
-                    <span>v2.0 Windows Edition</span>
+                    <span>v2.1 Multi-Interface</span>
                 </div>
             </div>
 
@@ -92,6 +92,19 @@
 
             <!-- TAB 1: DASHBOARD / LIVE MONITOR -->
             <section class="tab-pane active" id="pane-dashboard">
+
+                <!-- ═══ Multi-Interface Session Tab Bar ═══ -->
+                <div class="session-tabs-bar" id="sessionTabsBar">
+                    <div class="session-tabs-list" id="sessionTabsList">
+                        <!-- Injected by JS: one tab per interface session -->
+                    </div>
+                    <button class="btn btn-secondary btn-sm add-session-btn" id="btnAddSession"
+                        title="Add another network interface">
+                        <i class="fa-solid fa-plus"></i>
+                        <span>Add Interface</span>
+                    </button>
+                </div>
+
                 <!-- Metrics Grid -->
                 <div class="metrics-grid">
                     <div class="metric-card">
@@ -435,6 +448,35 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="app.closeModal('addRuleModal')">Cancel</button>
                 <button class="btn btn-primary" id="btnSubmitRule">Save Rule</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL: Add Interface Session -->
+    <div class="modal-overlay" id="addSessionModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-ethernet cyan"></i> Add Interface Session</h3>
+                <button class="btn-close" onclick="app.closeModal('addSessionModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-desc">Create a new throttling session on another network interface. Each interface runs
+                    independently with its own targets, devices, and bandwidth limits.</p>
+                <div class="form-group">
+                    <label class="form-label" for="addSessionInterface">Network Interface</label>
+                    <select id="addSessionInterface" class="input-dark select-dark"></select>
+                    <span class="form-help">Select an interface that is not already in an active session tab.</span>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="addSessionGateway">Gateway IP (auto-detected)</label>
+                    <input type="text" id="addSessionGateway" class="input-dark" placeholder="Auto-detected">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="app.closeModal('addSessionModal')">Cancel</button>
+                <button class="btn btn-primary" id="btnSubmitAddSession">
+                    <i class="fa-solid fa-plus"></i> Create Session
+                </button>
             </div>
         </div>
     </div>

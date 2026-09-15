@@ -349,14 +349,19 @@ def run_web_ui(host="0.0.0.0", port=5000):
     banner()
     console.print(f"  [bold green]●[/bold green] [bold white]Throttwin Web Dashboard[/bold white]")
     console.print(f"  [dim]• Local URL   :[/dim] [bold cyan]http://127.0.0.1:{port}[/bold cyan]")
-    if host == "0.0.0.0":
-        console.print(f"  [dim]• Network URL :[/dim] [bold cyan]http://{engine.current_router_ip}:{port}[/bold cyan]")
-    console.print(f"  [dim]• Interface   :[/dim] [white]{engine.current_interface or 'Auto-detecting'}[/white]")
-    console.print(f"  [dim]• Gateway     :[/dim] [white]{engine.current_router_ip or 'Auto-detecting'}[/white]\n")
-    console.print("  [dim]Press Ctrl+C to stop the web server.[/dim]\n")
 
-    # Pre-scan in background
-    threading.Thread(target=engine.scan, daemon=True).start()
+    # Display all auto-detected sessions
+    for sid, session in engine.sessions.items():
+        console.print(f"  [dim]• Session     :[/dim] [white]{sid}[/white] → [cyan]{session.router_ip}[/cyan]")
+
+    if not engine.sessions:
+        console.print(f"  [dim]• Interface   :[/dim] [white]No active interfaces detected[/white]")
+
+    console.print(f"\n  [dim]Press Ctrl+C to stop the web server.[/dim]\n")
+
+    # Pre-scan all sessions in background
+    for session in engine.sessions.values():
+        threading.Thread(target=session.scan, daemon=True).start()
 
     # Suppress werkzeug noise
     class WerkzeugFilter(logging.Filter):
@@ -373,7 +378,10 @@ def run_web_ui(host="0.0.0.0", port=5000):
     except KeyboardInterrupt:
         console.print("\n [error]Web server stopped.[/error]")
     finally:
-        engine.stop_session()
+        # Stop all running sessions
+        for session in engine.sessions.values():
+            if session.status == "RUNNING":
+                session.stop_session()
 
 
 if __name__ == "__main__":

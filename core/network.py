@@ -62,11 +62,33 @@ def get_interface_ip_and_mac(iface_name):
     return ip, mac
 
 
+def _parse_route_table():
+    """
+    Parse the Windows routing table and return a list of
+    (gateway_ip, interface_ip, metric) tuples for default routes.
+    """
+    entries = []
+    try:
+        result = run("route print 0.0.0.0")
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
+                gw_ip = parts[2]
+                iface_ip = parts[3]
+                metric = int(parts[4]) if parts[4].isdigit() else 9999
+                if gw_ip and gw_ip != "0.0.0.0":
+                    entries.append((gw_ip, iface_ip, metric))
+    except Exception:
+        pass
+    return entries
+
+
 def get_active_interfaces():
     """
     Return list of active network interfaces with real IPv4 and MAC addresses.
     Filters out loopback, virtual/VPN adapters, and link-local-only interfaces.
-    Prioritizes the interface that has the active default gateway route.
+    Each entry includes the per-interface gateway resolved from the routing table.
+    Prioritizes the interface that has the lowest metric default gateway route.
     """
     interfaces = []
     stats = psutil.net_if_stats()
@@ -89,7 +111,13 @@ def get_active_interfaces():
         "direct virtual", "mobile broadband"
     ]
 
-    gw_ip = get_default_gateway()
+    # Parse routing table for per-interface gateway mapping
+    route_entries = _parse_route_table()
+    # Map interface_ip -> (gateway_ip, metric)
+    ip_to_gw = {}
+    for gw_ip, iface_ip, metric in route_entries:
+        if iface_ip not in ip_to_gw or metric < ip_to_gw[iface_ip][1]:
+            ip_to_gw[iface_ip] = (gw_ip, metric)
 
     for iface_name, stat in stats.items():
         if not stat.isup or iface_name not in addrs:
@@ -121,23 +149,22 @@ def get_active_interfaces():
         # Clean up Windows MAC format (xx-xx-xx -> xx:xx:xx)
         mac_clean = AF_LINK.lower().replace("-", ":")
 
+        # Resolve per-interface gateway from routing table
+        iface_ip = ipv4[0]
+        gw_info = ip_to_gw.get(iface_ip)
+        gateway = gw_info[0] if gw_info else None
+        metric = gw_info[1] if gw_info else 9999
+
         interfaces.append({
             "name": iface_name,
-            "ip":   ipv4[0],
+            "ip":   iface_ip,
             "mac":  mac_clean,
+            "gateway": gateway,
+            "metric": metric,
         })
 
-    # Sort so that the interface matching the default gateway subnet comes first
-    def _iface_priority(item):
-        iface_ip = item["ip"]
-        if gw_ip:
-            # Check if gateway IP starts with same /24 prefix
-            gw_prefix = ".".join(gw_ip.split(".")[:3])
-            if iface_ip.startswith(gw_prefix):
-                return 0
-        return 1
-
-    interfaces.sort(key=_iface_priority)
+    # Sort by route metric (lowest = preferred default interface)
+    interfaces.sort(key=lambda x: x.get("metric", 9999))
     return interfaces
 
 
@@ -157,9 +184,19 @@ def get_scapy_interface(friendly_name):
 
 def get_default_gateway(interface=None):
     """
-    Detect the default gateway IP using Windows routing table via Scapy.
-    Falls back to parsing `route print` output.
+    Detect the default gateway IP for a given interface.
+    If interface is specified, resolves per-interface gateway from routing table.
+    Otherwise returns the gateway with the lowest metric.
     """
+    if interface:
+        # Resolve interface IP first
+        iface_ip, _ = get_interface_ip_and_mac(interface)
+        if iface_ip:
+            for gw_ip, route_iface_ip, metric in _parse_route_table():
+                if route_iface_ip == iface_ip:
+                    return gw_ip
+
+    # Fallback: Scapy default route
     try:
         from scapy.all import conf
         route = conf.route.route("0.0.0.0")
@@ -168,42 +205,26 @@ def get_default_gateway(interface=None):
     except Exception:
         pass
 
-    try:
-        result = run("route print 0.0.0.0")
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 5 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
-                return parts[2]
-    except Exception:
-        pass
+    # Fallback: lowest-metric entry from route print
+    entries = _parse_route_table()
+    if entries:
+        entries.sort(key=lambda e: e[2])  # sort by metric
+        return entries[0][0]
 
     return None
 
 
 def get_gateways():
     """
-    Return list of {ip, interface} dicts for each detected default gateway.
+    Return list of {ip, interface_ip} dicts for each detected default gateway.
     """
     gateways = []
-    try:
-        result = run("route print 0.0.0.0")
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 5 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
-                gw_ip = parts[2]
-                if gw_ip and gw_ip != "0.0.0.0":
-                    gateways.append({"ip": gw_ip})
-    except Exception:
-        pass
-
-    # Deduplicate
     seen = set()
-    unique = []
-    for g in gateways:
-        if g["ip"] not in seen:
-            seen.add(g["ip"])
-            unique.append(g)
-    return unique
+    for gw_ip, iface_ip, metric in _parse_route_table():
+        if gw_ip not in seen:
+            seen.add(gw_ip)
+            gateways.append({"ip": gw_ip, "interface_ip": iface_ip, "metric": metric})
+    return gateways
 
 
 def resolve_mac_from_arp_cache(ip):

@@ -1,25 +1,19 @@
 /**
- * Throttwin Web UI Client Application
- * Dynamic SSE-powered real-time bandwidth shaper & network monitor for Windows
+ * Throttwin Web UI Client Application — Multi-Interface Edition
+ * Manages multiple simultaneous sessions across different network interfaces.
+ * Each session has independent devices, targets, telemetry, and controls.
  */
 
 class ThrottwinApp {
     constructor() {
-        this.state = {
-            status: "IDLE",
-            mode: "blacklist",
-            limit_mbps: 1.0,
-            interface: null,
-            router_ip: null,
-            devices: [],
-            targets: [],
-            whitelisted: [],
-            rules: { whitelist: {}, blacklist: {} },
-            selectedIps: new Set(),
-            telemetry: [],
-            uptime: 0,
-            autoThrottledCount: 0
-        };
+        // Multi-session state: keyed by session_id (interface name)
+        this.sessions = {};         // {session_id: sessionState}
+        this.activeSessionId = null;
+        this.sessionIds = [];
+
+        // Shared state
+        this.rules = { whitelist: {}, blacklist: {} };
+        this.availableInterfaces = [];
 
         this.eventSource = null;
         this.timerInterval = null;
@@ -28,6 +22,48 @@ class ThrottwinApp {
         this.init();
     }
 
+    // ─── Session State Helpers ────────────────────────────────────────────
+
+    _defaultSessionState(sessionId) {
+        return {
+            session_id: sessionId,
+            status: "IDLE",
+            mode: "blacklist",
+            limit_mbps: 1.0,
+            interface: sessionId,
+            router_ip: null,
+            devices: [],
+            targets: [],
+            whitelisted: [],
+            telemetry: [],
+            uptime: 0,
+            autoThrottledCount: 0,
+            selectedIps: new Set(),
+        };
+    }
+
+    getActiveSession() {
+        if (this.activeSessionId && this.sessions[this.activeSessionId]) {
+            return this.sessions[this.activeSessionId];
+        }
+        // Fallback to first session
+        const first = Object.keys(this.sessions)[0];
+        if (first) {
+            this.activeSessionId = first;
+            return this.sessions[first];
+        }
+        return this._defaultSessionState("none");
+    }
+
+    _ensureSession(sid) {
+        if (!this.sessions[sid]) {
+            this.sessions[sid] = this._defaultSessionState(sid);
+        }
+        return this.sessions[sid];
+    }
+
+    // ─── Init ─────────────────────────────────────────────────────────────
+
     async init() {
         this.bindEvents();
         await this.loadInterfaces();
@@ -35,11 +71,6 @@ class ThrottwinApp {
         await this.fetchStatus();
         this.initSSE();
         this.startLocalTimer();
-
-        // Auto-trigger background scan on load if device cache is empty
-        if (!this.state.devices || this.state.devices.length === 0) {
-            this.triggerScan();
-        }
     }
 
 
@@ -78,74 +109,168 @@ class ThrottwinApp {
 
     handleSSEEvent(payload) {
         const type = payload.type;
-        const data = payload.data || payload.state;
+        const data = payload.data || payload.state || {};
+        const sid = data.session_id;
 
         switch (type) {
             case "init":
-                if (payload.state) this.updateUIWithState(payload.state);
+                // Multi-session init
+                if (payload.sessions) {
+                    this.sessionIds = payload.session_ids || Object.keys(payload.sessions);
+                    for (const [id, state] of Object.entries(payload.sessions)) {
+                        this._ensureSession(id);
+                        this._mergeSessionState(id, state);
+                    }
+                    if (!this.activeSessionId && this.sessionIds.length) {
+                        this.activeSessionId = this.sessionIds[0];
+                    }
+                    this.renderSessionTabs();
+                    this.updateActiveSessionUI();
+
+                    // Auto-trigger scan for empty sessions
+                    const active = this.getActiveSession();
+                    if (!active.devices || active.devices.length === 0) {
+                        this.triggerScan();
+                    }
+                }
                 break;
 
             case "devices_discovered":
-                if (data.new_devices && data.new_devices.length) {
-                    this.showToast(`📡 Discovered ${data.new_devices.length} new device(s) on network.`, 'info');
-                }
-                if (data.all_devices) {
-                    this.state.devices = data.all_devices;
-                    this.renderDashboardTable();
-                    this.renderScannerTable();
+                if (sid) {
+                    const sess = this._ensureSession(sid);
+                    if (data.all_devices) sess.devices = data.all_devices;
+                    if (data.new_devices && data.new_devices.length) {
+                        const label = sid === this.activeSessionId ? '' : ` [${sid}]`;
+                        this.showToast(`📡 Discovered ${data.new_devices.length} new device(s)${label}`, 'info');
+                    }
+                    if (sid === this.activeSessionId) {
+                        this.renderDashboardTable();
+                        this.renderScannerTable();
+                    }
+                    this.renderSessionTabs();
                 }
                 break;
 
             case "device_auto_throttled":
-                this.state.autoThrottledCount += 1;
-                const dev = data.device || {};
-                const limit = data.limit_mbps || this.state.limit_mbps;
-                this.showToast(`⚡ AUTO-THROTTLED: ${dev.ip || 'Device'} (${dev.vendor || dev.mac || 'Unknown'}) capped at ${limit} Mbps!`, 'error');
-                this.updateRadarBanner();
-                this.fetchStatus();
+                if (sid) {
+                    const sess = this._ensureSession(sid);
+                    sess.autoThrottledCount += 1;
+                    const dev = data.device || {};
+                    const limit = data.limit_mbps || sess.limit_mbps;
+                    this.showToast(`⚡ AUTO-THROTTLED [${sid}]: ${dev.ip || 'Device'} (${dev.vendor || dev.mac || 'Unknown'}) capped at ${limit} Mbps!`, 'error');
+                    if (sid === this.activeSessionId) {
+                        this.updateRadarBanner();
+                        this.fetchSessionStatus(sid);
+                    }
+                    this.renderSessionTabs();
+                }
                 break;
 
             case "devices_updated":
-                if (data.devices) {
-                    this.state.devices = data.devices;
-                    this.renderDashboardTable();
-                    this.renderScannerTable();
+                if (sid) {
+                    const sess = this._ensureSession(sid);
+                    if (data.devices) sess.devices = data.devices;
+                    if (sid === this.activeSessionId) {
+                        this.renderDashboardTable();
+                        this.renderScannerTable();
+                    }
                 }
                 break;
 
             case "target_toggled":
-                if (data.state) this.updateUIWithState(data.state);
-                this.showToast(`Target ${data.ip} ${data.is_throttled ? 'throttling activated' : 'throttling removed'}.`, data.is_throttled ? 'success' : 'info');
+                if (data.state && sid) {
+                    this._mergeSessionState(sid, data.state);
+                    if (sid === this.activeSessionId) this.updateActiveSessionUI();
+                    this.showToast(`Target ${data.ip} ${data.throttled ? 'throttling activated' : 'throttling removed'} [${sid}]`, data.throttled ? 'success' : 'info');
+                    this.renderSessionTabs();
+                }
                 break;
 
             case "limit_updated":
-                this.state.limit_mbps = data.limit_mbps;
-                document.getElementById('statBandwidthLimit').innerHTML = `${this.state.limit_mbps} <span class="unit">Mbps</span>`;
-                const radarLimit = document.getElementById('radarLimitVal');
-                if (radarLimit) radarLimit.textContent = this.state.limit_mbps;
-                this.showToast(`⚡ Live bandwidth limit adjusted to ${this.state.limit_mbps} Mbps!`, 'success');
+                if (sid) {
+                    const sess = this._ensureSession(sid);
+                    sess.limit_mbps = data.limit_mbps;
+                    if (sid === this.activeSessionId) {
+                        document.getElementById('statBandwidthLimit').innerHTML = `${sess.limit_mbps} <span class="unit">Mbps</span>`;
+                        const radarLimit = document.getElementById('radarLimitVal');
+                        if (radarLimit) radarLimit.textContent = sess.limit_mbps;
+                    }
+                    this.showToast(`⚡ Limit adjusted to ${data.limit_mbps} Mbps [${sid}]`, 'success');
+                }
                 break;
 
             case "session_started":
-                this.state.autoThrottledCount = 0;
-                this.updateUIWithState(data);
-                this.showToast('🚀 Bandwidth shaping session is now ACTIVE.', 'success');
+                if (sid) {
+                    const sess = this._ensureSession(sid);
+                    sess.autoThrottledCount = 0;
+                    this._mergeSessionState(sid, data);
+                    if (sid === this.activeSessionId) this.updateActiveSessionUI();
+                    this.renderSessionTabs();
+                    this.showToast(`🚀 Session ACTIVE on ${sid}`, 'success');
+                }
                 break;
 
             case "session_stopped":
-                this.state.autoThrottledCount = 0;
-                this.updateUIWithState(data);
-                this.showToast('🛑 Session stopped. Network traffic restored.', 'info');
+                if (sid) {
+                    this._mergeSessionState(sid, data);
+                    const sess = this._ensureSession(sid);
+                    sess.autoThrottledCount = 0;
+                    if (sid === this.activeSessionId) this.updateActiveSessionUI();
+                    this.renderSessionTabs();
+                    this.showToast(`🛑 Session stopped on ${sid}`, 'info');
+                }
+                break;
+
+            case "session_created":
+                if (sid && !this.sessions[sid]) {
+                    this._ensureSession(sid);
+                    if (!this.sessionIds.includes(sid)) this.sessionIds.push(sid);
+                    this.renderSessionTabs();
+                    this.showToast(`➕ New session created: ${sid}`, 'success');
+                }
+                break;
+
+            case "session_deleted":
+                if (sid && this.sessions[sid]) {
+                    delete this.sessions[sid];
+                    this.sessionIds = this.sessionIds.filter(id => id !== sid);
+                    if (this.activeSessionId === sid) {
+                        this.activeSessionId = this.sessionIds[0] || null;
+                    }
+                    this.renderSessionTabs();
+                    if (this.activeSessionId) this.updateActiveSessionUI();
+                    this.showToast(`🗑 Session removed: ${sid}`, 'info');
+                }
                 break;
 
             case "cache_cleared":
-                this.state.devices = [];
-                this.state.selectedIps.clear();
-                this.renderDashboardTable();
-                this.renderScannerTable();
+                if (sid) {
+                    const sess = this._ensureSession(sid);
+                    sess.devices = [];
+                    sess.selectedIps.clear();
+                    if (sid === this.activeSessionId) {
+                        this.renderDashboardTable();
+                        this.renderScannerTable();
+                    }
+                }
                 break;
         }
     }
+
+    _mergeSessionState(sid, state) {
+        const sess = this._ensureSession(sid);
+        if (state.status) sess.status = state.status;
+        if (state.devices) sess.devices = state.devices;
+        if (state.targets) sess.targets = state.targets;
+        if (state.whitelisted) sess.whitelisted = state.whitelisted;
+        if (state.telemetry) sess.telemetry = state.telemetry;
+        if (state.uptime !== undefined) sess.uptime = state.uptime;
+        if (state.limit_mbps) sess.limit_mbps = state.limit_mbps;
+        if (state.operational_mode) sess.mode = state.operational_mode;
+        if (state.interface) sess.interface = state.interface;
+        if (state.router_ip) sess.router_ip = state.router_ip;
+    }
+
 
     /* ==========================================================
        2. EVENT BINDINGS
@@ -159,7 +284,7 @@ class ThrottwinApp {
             });
         });
 
-        // Mode Toggles (Blacklist vs Whitelist)
+        // Mode Toggles
         const btnBl = document.getElementById('btnModeBlacklist');
         const btnWl = document.getElementById('btnModeWhitelist');
         if (btnBl) btnBl.addEventListener('click', () => this.setMode('blacklist'));
@@ -189,17 +314,13 @@ class ThrottwinApp {
             });
         }
 
-        // Live Apply Button for Running Sessions
+        // Live Apply Button
         const btnApplyLive = document.getElementById('btnApplyLiveLimit');
-        if (btnApplyLive) {
-            btnApplyLive.addEventListener('click', () => this.applyLiveLimit());
-        }
+        if (btnApplyLive) btnApplyLive.addEventListener('click', () => this.applyLiveLimit());
 
         // Session Control Button
         const btnSession = document.getElementById('btnSessionControl');
-        if (btnSession) {
-            btnSession.addEventListener('click', () => this.toggleSession());
-        }
+        if (btnSession) btnSession.addEventListener('click', () => this.toggleSession());
 
         // Rescan and Add Device Buttons
         const btnRescanTop = document.getElementById('btnRescanTop');
@@ -232,9 +353,7 @@ class ThrottwinApp {
         const selectIface = document.getElementById('settingInterface');
         if (selectIface) {
             selectIface.addEventListener('change', async (e) => {
-                const chosenIface = e.target.value;
-                this.state.interface = chosenIface;
-                await this.autoDetectGateway(chosenIface);
+                await this.autoDetectGateway(e.target.value);
             });
         }
 
@@ -248,7 +367,7 @@ class ThrottwinApp {
         const btnAutoDetectGw = document.getElementById('btnAutoDetectGateway');
         if (btnAutoDetectGw) {
             btnAutoDetectGw.addEventListener('click', async () => {
-                const curIface = document.getElementById('settingInterface')?.value || this.state.interface;
+                const curIface = document.getElementById('settingInterface')?.value;
                 await this.autoDetectGateway(curIface, true);
             });
         }
@@ -258,7 +377,6 @@ class ThrottwinApp {
             btnResetSet.addEventListener('click', async () => {
                 await this.loadInterfaces(true);
                 document.getElementById('settingDefaultLimit').value = '1.0';
-                this.state.limit_mbps = 1.0;
                 this.showToast('Reset settings to auto-detected system defaults.', 'info');
             });
         }
@@ -268,22 +386,47 @@ class ThrottwinApp {
         if (selectAllCb) {
             selectAllCb.addEventListener('change', (e) => {
                 const isChecked = e.target.checked;
+                const sess = this.getActiveSession();
                 document.querySelectorAll('.device-row-check').forEach(cb => {
                     cb.checked = isChecked;
                     const ip = cb.dataset.ip;
                     if (isChecked) {
-                        this.state.selectedIps.add(ip);
+                        sess.selectedIps.add(ip);
                     } else {
-                        this.state.selectedIps.delete(ip);
+                        sess.selectedIps.delete(ip);
                     }
                 });
+            });
+        }
+
+        // Add Session Button
+        const btnAddSession = document.getElementById('btnAddSession');
+        if (btnAddSession) btnAddSession.addEventListener('click', () => this.openAddSessionModal());
+
+        // Submit Add Session
+        const btnSubmitAddSession = document.getElementById('btnSubmitAddSession');
+        if (btnSubmitAddSession) btnSubmitAddSession.addEventListener('click', () => this.submitAddSession());
+
+        // Auto-detect gateway when selecting interface in add-session modal
+        const addSessionIface = document.getElementById('addSessionInterface');
+        if (addSessionIface) {
+            addSessionIface.addEventListener('change', async (e) => {
+                const iface = e.target.value;
+                try {
+                    const res = await fetch(`/api/interfaces?interface=${encodeURIComponent(iface)}`);
+                    const data = await res.json();
+                    if (data.success && data.default_gateway) {
+                        document.getElementById('addSessionGateway').value = data.default_gateway;
+                    }
+                } catch (ex) {}
             });
         }
     }
 
 
     handleLimitSelection(newLimit) {
-        this.state.limit_mbps = newLimit;
+        const sess = this.getActiveSession();
+        sess.limit_mbps = newLimit;
         const statLim = document.getElementById('statBandwidthLimit');
         if (statLim) statLim.innerHTML = `${newLimit} <span class="unit">Mbps</span>`;
         const radarLim = document.getElementById('radarLimitVal');
@@ -291,24 +434,21 @@ class ThrottwinApp {
 
         const btnApplyLive = document.getElementById('btnApplyLiveLimit');
         if (btnApplyLive) {
-            if (this.state.status === "RUNNING") {
-                btnApplyLive.style.display = 'inline-flex';
-            } else {
-                btnApplyLive.style.display = 'none';
-            }
+            btnApplyLive.style.display = sess.status === "RUNNING" ? 'inline-flex' : 'none';
         }
     }
 
     async applyLiveLimit() {
+        const sess = this.getActiveSession();
         try {
             const res = await fetch('/api/session/limit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ limit_mbps: this.state.limit_mbps })
+                body: JSON.stringify({ limit_mbps: sess.limit_mbps, session_id: sess.session_id })
             });
             const data = await res.json();
             if (data.success) {
-                this.showToast(`Applied limit: ${this.state.limit_mbps} Mbps live!`, 'success');
+                this.showToast(`Applied limit: ${sess.limit_mbps} Mbps live on ${sess.session_id}!`, 'success');
                 const btnApplyLive = document.getElementById('btnApplyLiveLimit');
                 if (btnApplyLive) btnApplyLive.style.display = 'none';
             } else {
@@ -335,7 +475,8 @@ class ThrottwinApp {
     }
 
     setMode(mode) {
-        this.state.mode = mode;
+        const sess = this.getActiveSession();
+        sess.mode = mode;
         const btnBl = document.getElementById('btnModeBlacklist');
         const btnWl = document.getElementById('btnModeWhitelist');
         if (btnBl) btnBl.classList.toggle('active', mode === 'blacklist');
@@ -343,8 +484,7 @@ class ThrottwinApp {
         const subtitle = document.getElementById('statModeSubtitle');
         if (subtitle) subtitle.textContent = `Mode: ${mode.charAt(0).toUpperCase() + mode.slice(1)}`;
 
-        // Clear selection to reset defaults for the newly chosen mode
-        this.state.selectedIps.clear();
+        sess.selectedIps.clear();
         this.updateRadarBanner();
         this.renderDashboardTable();
     }
@@ -352,104 +492,87 @@ class ThrottwinApp {
     updateRadarBanner() {
         const banner = document.getElementById('dynamicRadarBanner');
         if (!banner) return;
+        const sess = this.getActiveSession();
 
-        if (this.state.status === "RUNNING" && this.state.mode === "whitelist") {
+        if (sess.status === "RUNNING" && sess.mode === "whitelist") {
             banner.style.display = 'flex';
             const radarLim = document.getElementById('radarLimitVal');
             const radarCount = document.getElementById('radarThrottledCount');
-            if (radarLim) radarLim.textContent = this.state.limit_mbps;
-            if (radarCount) radarCount.textContent = this.state.autoThrottledCount;
+            if (radarLim) radarLim.textContent = sess.limit_mbps;
+            if (radarCount) radarCount.textContent = sess.autoThrottledCount;
         } else {
             banner.style.display = 'none';
         }
     }
 
-    async loadInterfaces(showToastFeedback = false) {
-        try {
-            const res = await fetch('/api/interfaces');
-            const data = await res.json();
-            if (data.success) {
-                const select = document.getElementById('settingInterface');
-                if (select) {
-                    select.innerHTML = '';
-                    data.interfaces.forEach(iface => {
-                        const opt = document.createElement('option');
-                        opt.value = iface;
-                        opt.textContent = iface;
-                        if (iface === data.default_interface) opt.selected = true;
-                        select.appendChild(opt);
-                    });
+
+    /* ==========================================================
+       3. SESSION TABS
+       ========================================================== */
+    renderSessionTabs() {
+        const container = document.getElementById('sessionTabsList');
+        const tabsBar = document.getElementById('sessionTabsBar');
+        if (!container || !tabsBar) return;
+
+        container.innerHTML = '';
+
+        const ids = this.sessionIds.length ? this.sessionIds : Object.keys(this.sessions);
+
+        ids.forEach(sid => {
+            const sess = this.sessions[sid];
+            if (!sess) return;
+
+            const tab = document.createElement('button');
+            tab.className = `session-tab ${sid === this.activeSessionId ? 'active' : ''}`;
+            tab.dataset.sessionId = sid;
+
+            const statusClass = sess.status === 'RUNNING' ? 'running' : 'idle';
+            const statusLabel = sess.status === 'RUNNING' ? 'ACTIVE' : 'IDLE';
+            const subnet = sess.router_ip ? sess.router_ip.split('.').slice(0, 3).join('.') + '.x' : '—';
+            const targetCount = (sess.targets || []).length;
+            const deviceCount = (sess.devices || []).length;
+
+            tab.innerHTML = `
+                <div class="session-tab-status ${statusClass}"></div>
+                <div class="session-tab-info">
+                    <span class="session-tab-name">${sid}</span>
+                    <span class="session-tab-subnet">${subnet} · ${deviceCount} dev${deviceCount !== 1 ? 's' : ''}</span>
+                </div>
+                <span class="session-tab-badge ${statusClass}">${statusLabel}${targetCount > 0 ? ` (${targetCount})` : ''}</span>
+                ${ids.length > 1 && sess.status !== 'RUNNING' ? `<button class="session-tab-close" data-close-session="${sid}" title="Remove session">&times;</button>` : ''}
+            `;
+
+            tab.addEventListener('click', (e) => {
+                if (e.target.classList.contains('session-tab-close')) {
+                    e.stopPropagation();
+                    this.deleteSession(e.target.dataset.closeSession);
+                    return;
                 }
+                this.switchSession(sid);
+            });
 
-                this.state.interface = data.default_interface;
-                this.state.router_ip = data.default_gateway || '192.168.1.1';
-                const routerInp = document.getElementById('settingRouterIp');
-                if (routerInp) routerInp.value = this.state.router_ip;
+            container.appendChild(tab);
+        });
 
-                if (showToastFeedback) {
-                    this.showToast(`Auto-detected interface: ${data.default_interface} (Gateway: ${this.state.router_ip})`, 'success');
-                }
-            }
-        } catch (e) {
-            console.error("Failed to load interfaces:", e);
+        // Show/hide tab bar
+        tabsBar.style.display = 'flex';
+    }
+
+    switchSession(sid) {
+        if (sid === this.activeSessionId) return;
+        this.activeSessionId = sid;
+        this.renderSessionTabs();
+        this.updateActiveSessionUI();
+
+        // Auto-scan if empty
+        const sess = this.getActiveSession();
+        if (!sess.devices || sess.devices.length === 0) {
+            this.triggerScan();
         }
     }
 
-    async autoDetectGateway(iface, showToastFeedback = false) {
-        try {
-            const url = iface ? `/api/interfaces?interface=${encodeURIComponent(iface)}` : '/api/interfaces';
-            const res = await fetch(url);
-            const data = await res.json();
-            if (data.success && data.default_gateway) {
-                this.state.router_ip = data.default_gateway;
-                const routerInp = document.getElementById('settingRouterIp');
-                if (routerInp) routerInp.value = data.default_gateway;
-                if (showToastFeedback) {
-                    this.showToast(`Auto-detected Gateway: ${data.default_gateway} on ${iface || data.default_interface}`, 'success');
-                }
-            }
-        } catch (e) {
-            if (showToastFeedback) {
-                this.showToast('Failed to auto-detect gateway.', 'error');
-            }
-        }
-    }
-
-
-    async loadRules() {
-        try {
-            const res = await fetch('/api/rules');
-            const data = await res.json();
-            if (data.success) {
-                this.state.rules = data.rules;
-                this.renderRules();
-            }
-        } catch (e) {
-            console.error("Failed to load rules:", e);
-        }
-    }
-
-    async fetchStatus() {
-        try {
-            const res = await fetch('/api/status');
-            const data = await res.json();
-            if (data.success) {
-                this.updateUIWithState(data.data);
-            }
-        } catch (e) {
-            console.error("Failed to fetch status:", e);
-        }
-    }
-
-    updateUIWithState(state) {
-        this.state.status = state.status;
-        this.state.devices = state.devices || [];
-        this.state.targets = state.targets || [];
-        this.state.whitelisted = state.whitelisted || [];
-        this.state.telemetry = state.telemetry || [];
-        this.state.uptime = state.uptime || 0;
-        if (state.limit_mbps) this.state.limit_mbps = state.limit_mbps;
-        if (state.operational_mode) this.state.mode = state.operational_mode;
+    updateActiveSessionUI() {
+        const sess = this.getActiveSession();
 
         // Update Session Status Pill & Control Button
         const pill = document.getElementById('sessionStatusPill');
@@ -458,7 +581,7 @@ class ThrottwinApp {
         const timer = document.getElementById('sessionTimer');
         const btnApplyLive = document.getElementById('btnApplyLiveLimit');
 
-        if (state.status === "RUNNING") {
+        if (sess.status === "RUNNING") {
             if (pill) pill.className = 'session-status-pill running';
             if (text) text.textContent = 'ACTIVE';
             if (btn) {
@@ -479,39 +602,149 @@ class ThrottwinApp {
             if (btnApplyLive) btnApplyLive.style.display = 'none';
         }
 
-
         // Mode Pill Sync
         const btnBl = document.getElementById('btnModeBlacklist');
         const btnWl = document.getElementById('btnModeWhitelist');
-        if (btnBl) btnBl.classList.toggle('active', this.state.mode === 'blacklist');
-        if (btnWl) btnWl.classList.toggle('active', this.state.mode === 'whitelist');
+        if (btnBl) btnBl.classList.toggle('active', sess.mode === 'blacklist');
+        if (btnWl) btnWl.classList.toggle('active', sess.mode === 'whitelist');
         const subtitle = document.getElementById('statModeSubtitle');
-        if (subtitle) subtitle.textContent = `Mode: ${this.state.mode.charAt(0).toUpperCase() + this.state.mode.slice(1)}`;
+        if (subtitle) subtitle.textContent = `Mode: ${sess.mode.charAt(0).toUpperCase() + sess.mode.slice(1)}`;
 
         // Metrics
         const statThroughput = document.getElementById('statThroughput');
-        if (statThroughput) statThroughput.innerHTML = `${state.total_speed_kbps || '0.0'} <span class="unit">KB/s</span>`;
+        if (statThroughput) statThroughput.innerHTML = `${sess.status === 'RUNNING' ? (sess._totalSpeedKbps || '0.0') : '0.0'} <span class="unit">KB/s</span>`;
         const statThroughputMbps = document.getElementById('statThroughputMbps');
-        if (statThroughputMbps) statThroughputMbps.textContent = `${state.total_speed_mbps || '0.00'} Mbps total speed`;
+        if (statThroughputMbps) statThroughputMbps.textContent = `${sess.status === 'RUNNING' ? (sess._totalSpeedMbps || '0.00') : '0.00'} Mbps total speed`;
         const statTargetCount = document.getElementById('statTargetCount');
-        if (statTargetCount) statTargetCount.textContent = state.target_count || 0;
+        if (statTargetCount) statTargetCount.textContent = (sess.targets || []).length;
         const statLimit = document.getElementById('statBandwidthLimit');
-        if (statLimit) statLimit.innerHTML = `${state.limit_mbps || this.state.limit_mbps} <span class="unit">Mbps</span>`;
+        if (statLimit) statLimit.innerHTML = `${sess.limit_mbps} <span class="unit">Mbps</span>`;
         const statData = document.getElementById('statDataTransferred');
-        if (statData) statData.innerHTML = `${state.total_data_mb || '0.00'} <span class="unit">MB</span>`;
+        if (statData) statData.innerHTML = `${sess._totalDataMb || '0.00'} <span class="unit">MB</span>`;
 
         this.updateRadarBanner();
         this.renderDashboardTable();
     }
 
+
+    async loadInterfaces(showToastFeedback = false) {
+        try {
+            const res = await fetch('/api/interfaces');
+            const data = await res.json();
+            if (data.success) {
+                this.availableInterfaces = data.interfaces_full || [];
+
+                const select = document.getElementById('settingInterface');
+                if (select) {
+                    select.innerHTML = '';
+                    (data.interfaces || []).forEach(iface => {
+                        const opt = document.createElement('option');
+                        opt.value = iface;
+                        opt.textContent = iface;
+                        if (iface === data.default_interface) opt.selected = true;
+                        select.appendChild(opt);
+                    });
+                }
+
+                const routerInp = document.getElementById('settingRouterIp');
+                if (routerInp && data.default_gateway) routerInp.value = data.default_gateway;
+
+                if (showToastFeedback) {
+                    this.showToast(`Auto-detected interface: ${data.default_interface} (Gateway: ${data.default_gateway})`, 'success');
+                }
+            }
+        } catch (e) {
+            console.error("Failed to load interfaces:", e);
+        }
+    }
+
+    async autoDetectGateway(iface, showToastFeedback = false) {
+        try {
+            const url = iface ? `/api/interfaces?interface=${encodeURIComponent(iface)}` : '/api/interfaces';
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.success && data.default_gateway) {
+                const routerInp = document.getElementById('settingRouterIp');
+                if (routerInp) routerInp.value = data.default_gateway;
+                if (showToastFeedback) {
+                    this.showToast(`Auto-detected Gateway: ${data.default_gateway} on ${iface || data.default_interface}`, 'success');
+                }
+            }
+        } catch (e) {
+            if (showToastFeedback) {
+                this.showToast('Failed to auto-detect gateway.', 'error');
+            }
+        }
+    }
+
+
+    async loadRules() {
+        try {
+            const res = await fetch('/api/rules');
+            const data = await res.json();
+            if (data.success) {
+                this.rules = data.rules;
+                this.renderRules();
+            }
+        } catch (e) {
+            console.error("Failed to load rules:", e);
+        }
+    }
+
+    async fetchStatus() {
+        try {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            if (data.success) {
+                // Multi-session aware
+                if (data.sessions) {
+                    this.sessionIds = data.session_ids || Object.keys(data.sessions);
+                    for (const [id, state] of Object.entries(data.sessions)) {
+                        this._ensureSession(id);
+                        this._mergeSessionState(id, state);
+                    }
+                    if (!this.activeSessionId && this.sessionIds.length) {
+                        this.activeSessionId = this.sessionIds[0];
+                    }
+                    this.renderSessionTabs();
+                    this.updateActiveSessionUI();
+                } else if (data.data) {
+                    // Legacy single-session fallback
+                    const sid = data.data.session_id || data.data.interface || 'default';
+                    this._ensureSession(sid);
+                    this._mergeSessionState(sid, data.data);
+                    if (!this.activeSessionId) this.activeSessionId = sid;
+                    this.renderSessionTabs();
+                    this.updateActiveSessionUI();
+                }
+            }
+        } catch (e) {
+            console.error("Failed to fetch status:", e);
+        }
+    }
+
+    async fetchSessionStatus(sid) {
+        try {
+            const res = await fetch(`/api/status?session_id=${encodeURIComponent(sid)}`);
+            const data = await res.json();
+            if (data.success && data.data) {
+                this._mergeSessionState(sid, data.data);
+                if (sid === this.activeSessionId) this.updateActiveSessionUI();
+            }
+        } catch (e) {}
+    }
+
+
     /* ==========================================================
-       3. DASHBOARD & LIVE TELEMETRY RENDERING
+       4. DASHBOARD & LIVE TELEMETRY RENDERING
        ========================================================== */
     renderDashboardTable() {
         const tbody = document.getElementById('devicesTableBody');
         if (!tbody) return;
 
-        if (!this.state.devices.length) {
+        const sess = this.getActiveSession();
+
+        if (!sess.devices.length) {
             tbody.innerHTML = `
                 <tr>
                     <td colspan="8" class="empty-state">
@@ -523,23 +756,21 @@ class ThrottwinApp {
         }
 
         const teleMap = {};
-        this.state.telemetry.forEach(t => {
+        (sess.telemetry || []).forEach(t => {
             teleMap[t.ip] = t;
         });
 
-        // Set of active targets actually being throttled
         const runningTargetIps = new Set(
-            this.state.targets.map(t => (typeof t === 'string' ? t : t.ip))
+            (sess.targets || []).map(t => (typeof t === 'string' ? t : t.ip))
         );
 
-        // Global whitelist MACs
-        const globalWl = this.state.rules.whitelist || {};
-        const globalBl = this.state.rules.blacklist || {};
+        const globalWl = this.rules.whitelist || {};
+        const globalBl = this.rules.blacklist || {};
 
-        const isRunning = this.state.status === "RUNNING";
+        const isRunning = sess.status === "RUNNING";
         tbody.innerHTML = '';
 
-        this.state.devices.forEach(dev => {
+        sess.devices.forEach(dev => {
             const tr = document.createElement('tr');
             const macLower = (dev.mac || '').toLowerCase();
             const ip = dev.ip || '-';
@@ -551,14 +782,11 @@ class ThrottwinApp {
 
             const isCurrentlyThrottled = runningTargetIps.has(ip);
 
-            // Auto select defaults before session starts:
-            // - In Blacklist mode: default check Blacklisted targets
-            // - In Whitelist mode: default check Safe/Whitelisted devices
-            let isChecked = this.state.selectedIps.has(ip);
-            if (!isRunning && !this.state.selectedIps.size) {
-                if (this.state.mode === "blacklist" && isGlobalBl) isChecked = true;
-                if (this.state.mode === "whitelist" && isGlobalWl) isChecked = true;
-                if (isChecked) this.state.selectedIps.add(ip);
+            let isChecked = sess.selectedIps.has(ip);
+            if (!isRunning && !sess.selectedIps.size) {
+                if (sess.mode === "blacklist" && isGlobalBl) isChecked = true;
+                if (sess.mode === "whitelist" && isGlobalWl) isChecked = true;
+                if (isChecked) sess.selectedIps.add(ip);
             }
 
             // Rule Badge
@@ -569,7 +797,7 @@ class ThrottwinApp {
                 badgeHtml = `<span class="badge badge-blacklist"><i class="fa-solid fa-skull"></i> Target ${blLabel ? `(${blLabel})` : ''}</span>`;
             }
 
-            // Telemetry stats & speed meter
+            // Telemetry
             const tele = teleMap[ip];
             let speedHtml = '<span class="text-muted">0.0 KB/s</span>';
             let onlineDot = '<span class="status-dot-sm offline" title="Offline / Idle"></span>';
@@ -578,11 +806,11 @@ class ThrottwinApp {
             if (isRunning && isCurrentlyThrottled) {
                 const speedKbps = tele ? tele.speed_kbps : 0.0;
                 const speedMbps = tele ? tele.speed_mbps : 0.00;
-                const maxCapKbps = (this.state.limit_mbps * 125.0); // 1 Mbps = 125 KB/s
+                const maxCapKbps = (sess.limit_mbps * 125.0);
                 const pct = Math.min(Math.round((speedKbps / Math.max(maxCapKbps, 1)) * 100), 100);
 
                 const isOnline = tele ? tele.is_online : true;
-                onlineDot = isOnline 
+                onlineDot = isOnline
                     ? '<span class="status-dot-sm online" title="Online & Active"></span>'
                     : '<span class="status-dot-sm offline" title="Probing / Offline"></span>';
 
@@ -604,11 +832,10 @@ class ThrottwinApp {
                 `;
             }
 
-            // Status Column & Live Switch
+            // Status Column
             let statusToggleHtml = '';
             if (isRunning) {
                 if (isGlobalWl) {
-                    // Safe devices are protected and bypassed
                     statusToggleHtml = `
                         <div class="hot-toggle-wrap">
                             <span class="badge badge-whitelist"><i class="fa-solid fa-shield-check"></i> SAFE (IMMUNE)</span>
@@ -628,18 +855,18 @@ class ThrottwinApp {
                     `;
                 }
             } else {
-                if (this.state.mode === "whitelist") {
+                if (sess.mode === "whitelist") {
                     statusToggleHtml = isGlobalWl || isChecked
                         ? `<span class="badge badge-whitelist"><i class="fa-solid fa-shield"></i> Safe / Whitelisted</span>`
                         : `<span class="badge badge-blacklist"><i class="fa-solid fa-crosshairs"></i> Will Throttle</span>`;
                 } else {
-                    statusToggleHtml = isChecked 
+                    statusToggleHtml = isChecked
                         ? `<span class="badge badge-blacklist"><i class="fa-solid fa-crosshairs"></i> Target</span>`
                         : `<span class="badge badge-idle">Idle</span>`;
                 }
             }
 
-            // Hostname & Vendor Display
+            // Hostname & Vendor
             let nameHtml = '';
             if (dev.hostname) {
                 nameHtml = `
@@ -674,9 +901,9 @@ class ThrottwinApp {
             if (cb) {
                 cb.addEventListener('change', (e) => {
                     if (e.target.checked) {
-                        this.state.selectedIps.add(ip);
+                        sess.selectedIps.add(ip);
                     } else {
-                        this.state.selectedIps.delete(ip);
+                        sess.selectedIps.delete(ip);
                     }
                     if (!isRunning) {
                         this.renderDashboardTable();
@@ -688,8 +915,7 @@ class ThrottwinApp {
             const toggleCb = tr.querySelector('.hot-toggle-cb');
             if (toggleCb) {
                 toggleCb.addEventListener('change', (e) => {
-                    const shouldThrottle = e.target.checked;
-                    this.hotToggleTarget(ip, shouldThrottle);
+                    this.hotToggleTarget(ip, e.target.checked);
                 });
             }
 
@@ -698,15 +924,17 @@ class ThrottwinApp {
     }
 
     async hotToggleTarget(ip, shouldThrottle) {
+        const sess = this.getActiveSession();
         try {
             const res = await fetch('/api/target/toggle', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ip, should_throttle: shouldThrottle })
+                body: JSON.stringify({ ip, should_throttle: shouldThrottle, session_id: sess.session_id })
             });
             const data = await res.json();
             if (data.success) {
-                this.updateUIWithState(data.state);
+                this._mergeSessionState(sess.session_id, data.state);
+                this.updateActiveSessionUI();
                 this.showToast(data.message, shouldThrottle ? 'success' : 'info');
             } else {
                 this.showToast(data.error || 'Failed to toggle target.', 'error');
@@ -721,14 +949,15 @@ class ThrottwinApp {
     renderScannerTable() {
         const tbody = document.getElementById('scannerTableBody');
         if (!tbody) return;
+        const sess = this.getActiveSession();
 
-        if (!this.state.devices.length) {
+        if (!sess.devices.length) {
             tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><p>No devices discovered yet.</p></td></tr>`;
             return;
         }
 
         tbody.innerHTML = '';
-        this.state.devices.forEach(dev => {
+        sess.devices.forEach(dev => {
             const tr = document.createElement('tr');
             let nameHtml = '';
             if (dev.hostname) {
@@ -763,8 +992,8 @@ class ThrottwinApp {
 
         if (!wlContainer || !blContainer) return;
 
-        const wl = this.state.rules.whitelist || {};
-        const bl = this.state.rules.blacklist || {};
+        const wl = this.rules.whitelist || {};
+        const bl = this.rules.blacklist || {};
 
         if (!Object.keys(wl).length) {
             wlContainer.innerHTML = '<div class="empty-state"><p>No global whitelist rules configured.</p></div>';
@@ -799,15 +1028,16 @@ class ThrottwinApp {
         }
     }
 
+
     /* ==========================================================
-       4. SESSION ACTIONS
+       5. SESSION ACTIONS
        ========================================================== */
     async toggleSession() {
         const btn = document.getElementById('btnSessionControl');
+        const sess = this.getActiveSession();
 
-        if (this.state.status === "RUNNING") {
-            // Immediate UI feedback
-            this.state.status = "STOPPING";
+        if (sess.status === "RUNNING") {
+            sess.status = "STOPPING";
             if (btn) {
                 btn.disabled = true;
                 btn.className = 'btn btn-secondary';
@@ -815,11 +1045,17 @@ class ThrottwinApp {
             }
 
             try {
-                const res = await fetch('/api/session/stop', { method: 'POST' });
+                const res = await fetch('/api/session/stop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sess.session_id })
+                });
                 const data = await res.json();
                 if (data.success) {
-                    this.showToast('Session stopped successfully.', 'info');
-                    this.updateUIWithState(data.state);
+                    this.showToast(`Session stopped on ${sess.session_id}.`, 'info');
+                    if (data.state) this._mergeSessionState(sess.session_id, data.state);
+                    this.updateActiveSessionUI();
+                    this.renderSessionTabs();
                 } else {
                     this.showToast(data.error || 'Failed to stop session.', 'error');
                 }
@@ -828,38 +1064,32 @@ class ThrottwinApp {
             } finally {
                 if (btn) btn.disabled = false;
             }
-        } else if (this.state.status !== "STOPPING") {
-            // Selected devices array
-            const selectedDevices = this.state.devices.filter(d => this.state.selectedIps.has(d.ip));
-            const globalWlMacs = new Set(Object.keys(this.state.rules.whitelist || {}).map(m => m.toLowerCase()));
+        } else if (sess.status !== "STOPPING") {
+            const selectedDevices = sess.devices.filter(d => sess.selectedIps.has(d.ip));
+            const globalWlMacs = new Set(Object.keys(this.rules.whitelist || {}).map(m => m.toLowerCase()));
 
             let targets = [];
             let whitelisted = [];
 
-            if (this.state.mode === "blacklist") {
-                // In Blacklist mode: throttle selected devices (except any in global whitelist)
+            if (sess.mode === "blacklist") {
                 targets = selectedDevices.filter(d => !globalWlMacs.has((d.mac || '').toLowerCase()));
-                whitelisted = this.state.devices.filter(d => globalWlMacs.has((d.mac || '').toLowerCase()));
+                whitelisted = sess.devices.filter(d => globalWlMacs.has((d.mac || '').toLowerCase()));
                 if (!targets.length) {
                     this.showToast('Please select at least one device to throttle.', 'error');
                     return;
                 }
             } else {
-                // In Whitelist mode:
-                // Safe devices = (all devices with global whitelist MAC) + (all selected devices)
                 const safeMacs = new Set([
                     ...globalWlMacs,
                     ...selectedDevices.map(d => (d.mac || '').toLowerCase()).filter(Boolean)
                 ]);
                 const safeIps = new Set(selectedDevices.map(d => d.ip).filter(ip => ip && ip !== '-'));
 
-                whitelisted = this.state.devices.filter(d => {
+                whitelisted = sess.devices.filter(d => {
                     const mac = (d.mac || '').toLowerCase();
                     return (mac && safeMacs.has(mac)) || safeIps.has(d.ip);
                 });
-
-                // Targets = all current devices that are NOT in the safe set
-                targets = this.state.devices.filter(d => {
+                targets = sess.devices.filter(d => {
                     const mac = (d.mac || '').toLowerCase();
                     return !((mac && safeMacs.has(mac)) || safeIps.has(d.ip));
                 });
@@ -872,12 +1102,13 @@ class ThrottwinApp {
 
             try {
                 const payload = {
-                    interface: this.state.interface,
-                    router_ip: this.state.router_ip,
-                    mode: this.state.mode,
+                    session_id: sess.session_id,
+                    interface: sess.interface,
+                    router_ip: sess.router_ip,
+                    mode: sess.mode,
                     targets: targets,
                     whitelisted: whitelisted,
-                    limit_mbps: this.state.limit_mbps
+                    limit_mbps: sess.limit_mbps
                 };
 
                 const res = await fetch('/api/session/start', {
@@ -888,8 +1119,10 @@ class ThrottwinApp {
                 const data = await res.json();
 
                 if (data.success) {
-                    this.showToast(data.message || 'Session started!', 'success');
-                    this.updateUIWithState(data.state);
+                    this.showToast(data.message || `Session started on ${sess.session_id}!`, 'success');
+                    if (data.state) this._mergeSessionState(sess.session_id, data.state);
+                    this.updateActiveSessionUI();
+                    this.renderSessionTabs();
                 } else {
                     this.showToast(data.error || 'Failed to start session.', 'error');
                 }
@@ -904,6 +1137,7 @@ class ThrottwinApp {
     async triggerScan() {
         if (this.isScanning) return;
         this.isScanning = true;
+        const sess = this.getActiveSession();
 
         const btnTop = document.getElementById('btnRescanTop');
         const btnTab = document.getElementById('btnScanDevicesTab');
@@ -920,29 +1154,31 @@ class ThrottwinApp {
         }
         if (statusBanner && statusText) {
             statusBanner.className = 'scanner-status-banner scanning';
-            statusText.textContent = 'Active Win32 SendARP sweep in progress...';
+            statusText.textContent = `Scanning ${sess.session_id} (Win32 SendARP)...`;
         }
 
-        this.showToast('Scanning network (native Win32 SendARP)...', 'info');
+        this.showToast(`Scanning ${sess.session_id}...`, 'info');
 
         try {
             const res = await fetch('/api/scan', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    interface: this.state.interface,
-                    router_ip: this.state.router_ip
+                    session_id: sess.session_id,
+                    interface: sess.interface,
+                    router_ip: sess.router_ip
                 })
             });
             const data = await res.json();
             if (data.success) {
-                this.state.devices = data.devices;
+                sess.devices = data.devices;
                 this.renderDashboardTable();
                 this.renderScannerTable();
-                this.showToast(`Scan complete: found ${data.count} active device(s).`, 'success');
+                this.renderSessionTabs();
+                this.showToast(`Scan complete on ${sess.session_id}: found ${data.count} device(s).`, 'success');
                 if (statusBanner && statusText) {
                     statusBanner.className = 'scanner-status-banner';
-                    statusText.textContent = `Network inventory updated: ${data.count} device(s) online.`;
+                    statusText.textContent = `[${sess.session_id}] ${data.count} device(s) online.`;
                 }
             } else {
                 this.showToast('Scan failed: ' + (data.error || 'Unknown error'), 'error');
@@ -967,6 +1203,7 @@ class ThrottwinApp {
         const ip = document.getElementById('manualDeviceIp').value.trim();
         const mac = document.getElementById('manualDeviceMac').value.trim();
         const vendor = document.getElementById('manualDeviceVendor').value.trim();
+        const sess = this.getActiveSession();
 
         if (!ip && !mac) {
             this.showToast('Please enter an IP address or a MAC address.', 'error');
@@ -977,7 +1214,7 @@ class ThrottwinApp {
             const res = await fetch('/api/devices/manual', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ip, mac, vendor })
+                body: JSON.stringify({ ip, mac, vendor, session_id: sess.session_id })
             });
             const data = await res.json();
             if (data.success) {
@@ -986,7 +1223,7 @@ class ThrottwinApp {
                 document.getElementById('manualDeviceMac').value = '';
                 document.getElementById('manualDeviceVendor').value = '';
                 this.showToast(`Added device: ${data.device.ip} (${data.device.mac})`, 'success');
-                await this.fetchStatus();
+                await this.fetchSessionStatus(sess.session_id);
             } else {
                 this.showToast(data.error || 'Failed to add manual device.', 'error');
             }
@@ -1016,7 +1253,7 @@ class ThrottwinApp {
                 this.closeModal('addRuleModal');
                 document.getElementById('ruleMacInput').value = '';
                 document.getElementById('ruleNameInput').value = '';
-                this.state.rules = data.rules;
+                this.rules = data.rules;
                 this.renderRules();
                 this.renderDashboardTable();
                 this.showToast(`Saved rule for ${mac}`, 'success');
@@ -1033,7 +1270,7 @@ class ThrottwinApp {
             const res = await fetch(`/api/rules/${category}/${encodeURIComponent(mac)}`, { method: 'DELETE' });
             const data = await res.json();
             if (data.success) {
-                this.state.rules = data.rules;
+                this.rules = data.rules;
                 this.renderRules();
                 this.renderDashboardTable();
                 this.showToast(`Removed rule for ${mac}`, 'info');
@@ -1044,13 +1281,18 @@ class ThrottwinApp {
     }
 
     async clearCache() {
-        if (confirm("Are you sure you want to clear device cache and saved session?")) {
+        if (confirm("Are you sure you want to clear device cache for this session?")) {
+            const sess = this.getActiveSession();
             try {
-                const res = await fetch('/api/devices/clear', { method: 'POST' });
+                const res = await fetch('/api/devices/clear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sess.session_id })
+                });
                 const data = await res.json();
                 if (data.success) {
                     this.showToast(data.message, 'success');
-                    await this.fetchStatus();
+                    await this.fetchSessionStatus(sess.session_id);
                 } else {
                     this.showToast(data.error, 'error');
                 }
@@ -1064,10 +1306,6 @@ class ThrottwinApp {
         const iface = document.getElementById('settingInterface').value;
         const router = document.getElementById('settingRouterIp').value.trim();
         const limit = parseFloat(document.getElementById('settingDefaultLimit').value) || 1.0;
-
-        this.state.interface = iface;
-        this.state.router_ip = router;
-        this.state.limit_mbps = limit;
 
         try {
             const res = await fetch('/api/settings', {
@@ -1086,6 +1324,101 @@ class ThrottwinApp {
         }
     }
 
+
+    /* ==========================================================
+       6. ADD/DELETE SESSION
+       ========================================================== */
+    openAddSessionModal() {
+        const select = document.getElementById('addSessionInterface');
+        if (select) {
+            select.innerHTML = '';
+            const existingIds = new Set(Object.keys(this.sessions));
+            const available = this.availableInterfaces.filter(i => !existingIds.has(i.name));
+
+            if (!available.length) {
+                this.showToast('All available interfaces already have sessions.', 'info');
+                return;
+            }
+
+            available.forEach(iface => {
+                const opt = document.createElement('option');
+                opt.value = iface.name;
+                opt.textContent = `${iface.name} (${iface.ip})`;
+                select.appendChild(opt);
+            });
+
+            // Pre-fill gateway
+            if (available.length) {
+                const gw = available[0].gateway || '';
+                document.getElementById('addSessionGateway').value = gw;
+            }
+        }
+        this.openModal('addSessionModal');
+    }
+
+    async submitAddSession() {
+        const iface = document.getElementById('addSessionInterface').value;
+        const gateway = document.getElementById('addSessionGateway').value.trim();
+
+        if (!iface) {
+            this.showToast('Select an interface.', 'error');
+            return;
+        }
+
+        try {
+            const res = await fetch('/api/sessions/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ interface: iface, router_ip: gateway || undefined })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.closeModal('addSessionModal');
+                if (data.sessions) {
+                    this.sessionIds = data.session_ids || Object.keys(data.sessions);
+                    for (const [id, state] of Object.entries(data.sessions)) {
+                        this._ensureSession(id);
+                        this._mergeSessionState(id, state);
+                    }
+                }
+                this.renderSessionTabs();
+                this.switchSession(iface);
+                this.showToast(`Created session for ${iface}`, 'success');
+            } else {
+                this.showToast(data.error || 'Failed to create session.', 'error');
+            }
+        } catch (e) {
+            this.showToast('Error creating session.', 'error');
+        }
+    }
+
+    async deleteSession(sid) {
+        if (!confirm(`Remove session "${sid}"? This will clear all discovered devices for this interface.`)) return;
+
+        try {
+            const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/delete`, { method: 'POST' });
+            const data = await res.json();
+            if (data.success) {
+                delete this.sessions[sid];
+                this.sessionIds = data.session_ids || this.sessionIds.filter(id => id !== sid);
+                if (this.activeSessionId === sid) {
+                    this.activeSessionId = this.sessionIds[0] || null;
+                }
+                this.renderSessionTabs();
+                if (this.activeSessionId) this.updateActiveSessionUI();
+                this.showToast(`Removed session: ${sid}`, 'info');
+            } else {
+                this.showToast(data.error || 'Failed to delete session.', 'error');
+            }
+        } catch (e) {
+            this.showToast('Error deleting session.', 'error');
+        }
+    }
+
+
+    /* ==========================================================
+       7. UTILITIES
+       ========================================================== */
     quickAddToRule(mac, vendor) {
         if (!mac || mac === 'Unknown') {
             this.showToast('Cannot create global rule without a MAC address.', 'error');
@@ -1122,7 +1455,7 @@ class ThrottwinApp {
         if (!container) return;
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
-        
+
         let icon = 'fa-info-circle';
         if (type === 'success') icon = 'fa-circle-check';
         if (type === 'error') icon = 'fa-circle-exclamation';
@@ -1138,33 +1471,48 @@ class ThrottwinApp {
     }
 
     startLocalTimer() {
-        // Polling fallback every 1.5s for metrics
+        // Polling fallback every 1.5s for metrics — poll ALL running sessions
         setInterval(async () => {
-            if (this.state.status === "RUNNING") {
-                try {
-                    const res = await fetch('/api/telemetry');
-                    const data = await res.json();
-                    if (data.success) {
-                        const statThroughput = document.getElementById('statThroughput');
-                        if (statThroughput) statThroughput.innerHTML = `${data.total_speed_kbps || '0.0'} <span class="unit">KB/s</span>`;
-                        const statThroughputMbps = document.getElementById('statThroughputMbps');
-                        if (statThroughputMbps) statThroughputMbps.textContent = `${data.total_speed_mbps || '0.00'} Mbps total speed`;
-                        const statData = document.getElementById('statDataTransferred');
-                        if (statData) statData.innerHTML = `${data.total_data_mb || '0.00'} <span class="unit">MB</span>`;
-                        this.state.telemetry = data.telemetry || [];
-                        this.renderDashboardTable();
-                    }
-                } catch (e) {}
+            for (const [sid, sess] of Object.entries(this.sessions)) {
+                if (sess.status === "RUNNING") {
+                    try {
+                        const res = await fetch(`/api/telemetry?session_id=${encodeURIComponent(sid)}`);
+                        const data = await res.json();
+                        if (data.success) {
+                            sess.telemetry = data.telemetry || [];
+                            sess._totalSpeedKbps = data.total_speed_kbps || '0.0';
+                            sess._totalSpeedMbps = data.total_speed_mbps || '0.00';
+                            sess._totalDataMb = data.total_data_mb || '0.00';
+
+                            if (sid === this.activeSessionId) {
+                                const statThroughput = document.getElementById('statThroughput');
+                                if (statThroughput) statThroughput.innerHTML = `${data.total_speed_kbps || '0.0'} <span class="unit">KB/s</span>`;
+                                const statThroughputMbps = document.getElementById('statThroughputMbps');
+                                if (statThroughputMbps) statThroughputMbps.textContent = `${data.total_speed_mbps || '0.00'} Mbps total speed`;
+                                const statData = document.getElementById('statDataTransferred');
+                                if (statData) statData.innerHTML = `${data.total_data_mb || '0.00'} <span class="unit">MB</span>`;
+                                this.renderDashboardTable();
+                            }
+                            this.renderSessionTabs();
+                        }
+                    } catch (e) {}
+                }
             }
         }, 1500);
 
-        // Timer interval
+        // Timer interval — tick each running session's uptime
         this.timerInterval = setInterval(() => {
-            if (this.state.status === "RUNNING") {
-                this.state.uptime += 1;
-                const hrs = String(Math.floor(this.state.uptime / 3600)).padStart(2, '0');
-                const mins = String(Math.floor((this.state.uptime % 3600) / 60)).padStart(2, '0');
-                const secs = String(this.state.uptime % 60).padStart(2, '0');
+            for (const [sid, sess] of Object.entries(this.sessions)) {
+                if (sess.status === "RUNNING") {
+                    sess.uptime += 1;
+                }
+            }
+            // Display active session timer
+            const active = this.getActiveSession();
+            if (active.status === "RUNNING") {
+                const hrs = String(Math.floor(active.uptime / 3600)).padStart(2, '0');
+                const mins = String(Math.floor((active.uptime % 3600) / 60)).padStart(2, '0');
+                const secs = String(active.uptime % 60).padStart(2, '0');
                 const timeDisp = document.getElementById('sessionTimeDisplay');
                 if (timeDisp) timeDisp.textContent = `${hrs}:${mins}:${secs}`;
             }
