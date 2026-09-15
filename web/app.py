@@ -216,5 +216,46 @@ def get_telemetry():
     })
 
 
+# ─── Settings ──────────────────────────────────────────────────────────────────
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings():
+    cfg = load_config() or {}
+    return jsonify({
+        "success": True,
+        "settings": {
+            "interface": cfg.get("interface") or engine.current_interface,
+            "router_ip": cfg.get("router_ip") or engine.current_router_ip,
+            "default_limit": cfg.get("limit_mbps", 1.0),
+        }
+    })
+
+
+@app.route("/api/settings", methods=["POST"])
+def save_settings_api():
+    data = request.get_json(silent=True) or {}
+    iface = data.get("interface")
+    router = data.get("router_ip")
+    limit = float(data.get("default_limit") or data.get("limit_mbps") or 1.0)
+
+    if iface:
+        engine.current_interface = iface
+    if router:
+        engine.current_router_ip = router
+    if limit:
+        engine.limit_mbps = limit
+
+    save_config(
+        interface=engine.current_interface,
+        router_ip=engine.current_router_ip,
+        mode=engine.operational_mode,
+        targets=engine.targets,
+        limit_mbps=engine.limit_mbps,
+        whitelisted=engine.whitelisted
+    )
+    return jsonify({"success": True, "message": "Settings saved successfully."})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
+

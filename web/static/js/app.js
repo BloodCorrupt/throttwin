@@ -1,656 +1,1088 @@
-/* ===== Throttwin Web UI — app.js ===== */
-'use strict';
+/**
+ * Throttwin Web UI Client Application
+ * Dynamic SSE-powered real-time bandwidth shaper & network monitor for Windows
+ */
 
-// ─── State ──────────────────────────────────────────────────
-const state = {
-    devices:    [],
-    targets:    [],
-    whitelisted:[],
-    rules:      { whitelist: {}, blacklist: {} },
-    status:     'IDLE',
-    limit_mbps: 1.0,
-    interface:  '',
-    router_ip:  '',
-    telemetry:  {},
-    uptime:     0,
-    sessionStartTs: null,
-    speedHistory: Array(60).fill(0),
-};
+class ThrottwinApp {
+    constructor() {
+        this.state = {
+            status: "IDLE",
+            mode: "blacklist",
+            limit_mbps: 1.0,
+            interface: null,
+            router_ip: null,
+            devices: [],
+            targets: [],
+            whitelisted: [],
+            rules: { whitelist: {}, blacklist: {} },
+            selectedIps: new Set(),
+            telemetry: [],
+            uptime: 0,
+            autoThrottledCount: 0
+        };
 
-// ─── Helpers ─────────────────────────────────────────────────
-function fmtBytes(b) {
-    if (b < 1024)           return `${b} B`;
-    if (b < 1048576)        return `${(b/1024).toFixed(1)} KB`;
-    if (b < 1073741824)     return `${(b/1048576).toFixed(1)} MB`;
-    return `${(b/1073741824).toFixed(2)} GB`;
-}
-function fmtDuration(s) {
-    s = Math.floor(s);
-    const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60;
-    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
-}
-function fmtMbps(v) { return `${Number(v).toFixed(2)} Mbps`; }
+        this.eventSource = null;
+        this.timerInterval = null;
+        this.isScanning = false;
 
-function toast(msg, type='info', duration=3500) {
-    const icons = { success:'fa-check-circle', error:'fa-circle-xmark', info:'fa-circle-info' };
-    const el = document.createElement('div');
-    el.className = `toast ${type}`;
-    el.innerHTML = `<i class="fa-solid ${icons[type]||icons.info}"></i><span>${msg}</span>`;
-    document.getElementById('toastContainer').appendChild(el);
-    setTimeout(() => {
-        el.classList.add('toast-fade');
-        setTimeout(() => el.remove(), 400);
-    }, duration);
-}
+        this.init();
+    }
 
-async function api(method, path, body) {
-    const opts = { method, headers: {'Content-Type':'application/json'} };
-    if (body) opts.body = JSON.stringify(body);
-    const r = await fetch(path, opts);
-    return r.json();
-}
+    async init() {
+        this.bindEvents();
+        await this.loadInterfaces();
+        await this.loadRules();
+        await this.fetchStatus();
+        this.initSSE();
+        this.startLocalTimer();
+    }
 
-// ─── Tab Navigation ───────────────────────────────────────────
-document.querySelectorAll('.nav-item').forEach(btn => {
-    btn.addEventListener('click', () => {
-        const tab = btn.dataset.tab;
-        document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
-        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-        btn.classList.add('active');
-        document.getElementById(`pane-${tab}`).classList.add('active');
-        if (tab === 'rules')    loadRules();
-        if (tab === 'settings') loadSettings();
-    });
-});
-
-// ─── Modal helpers ────────────────────────────────────────────
-function openModal(id)  { document.getElementById(id).classList.add('active'); }
-function closeModal(id) { document.getElementById(id).classList.remove('active'); }
-
-['closeModalStart','cancelModalStart'].forEach(id =>
-    document.getElementById(id)?.addEventListener('click', () => closeModal('modalStartSession')));
-['closeModalAddDevice','cancelAddDevice'].forEach(id =>
-    document.getElementById(id)?.addEventListener('click', () => closeModal('modalAddDevice')));
-['closeModalAddRule','cancelAddRule'].forEach(id =>
-    document.getElementById(id)?.addEventListener('click', () => closeModal('modalAddRule')));
-
-document.querySelectorAll('.modal-overlay').forEach(ov => {
-    ov.addEventListener('click', e => { if (e.target === ov) ov.classList.remove('active'); });
-});
-
-// ─── SSE Connection ───────────────────────────────────────────
-let sseRetryTimer = null;
-
-function connectSSE() {
-    const es = new EventSource('/api/stream');
-    const badge = document.getElementById('liveConnectionBadge');
-    const dot   = badge.querySelector('.status-dot');
-    const txt   = badge.querySelector('.status-text');
-
-    es.onopen = () => {
-        dot.className = 'status-dot connected';
-        txt.textContent = 'Live';
-        if (sseRetryTimer) { clearTimeout(sseRetryTimer); sseRetryTimer = null; }
-    };
-
-    es.onmessage = (e) => {
-        try {
-            const msg = JSON.parse(e.data);
-            if (msg.type === 'init') applyState(msg.state);
-            else if (msg.data?.state) applyState(msg.data.state);
-            else if (msg.data?.devices) { state.devices = msg.data.devices || state.devices; renderDevicesTable(); }
-        } catch {}
-    };
-
-    es.onerror = () => {
-        dot.className = 'status-dot error';
-        txt.textContent = 'Disconnected';
-        es.close();
-        sseRetryTimer = setTimeout(connectSSE, 4000);
-    };
-}
-connectSSE();
-
-// ─── State Application ────────────────────────────────────────
-function applyState(s) {
-    if (!s) return;
-    state.status     = s.status     || 'IDLE';
-    state.limit_mbps = s.limit_mbps || 1.0;
-    state.interface  = s.interface  || state.interface;
-    state.router_ip  = s.router_ip  || state.router_ip;
-    state.uptime     = s.uptime     || 0;
-    state.telemetry  = s.telemetry  || {};
-
-    if (s.devices)    state.devices    = s.devices;
-    if (s.targets)    state.targets    = s.targets;
-    if (s.whitelisted) state.whitelisted = s.whitelisted;
-
-    updateTopBar();
-    updateMetrics(s);
-    renderTargetsTable();
-    renderDevicesTable();
-}
-
-// ─── Top Bar / Status ─────────────────────────────────────────
-let timerInterval = null;
-
-function updateTopBar() {
-    const pill = document.getElementById('sessionStatusPill');
-    const txt  = document.getElementById('sessionStatusText');
-    const timer = document.getElementById('sessionTimer');
-    const btn   = document.getElementById('btnSessionControl');
-    const btnTxt = document.getElementById('btnSessionControlText');
-    const liveInd = document.getElementById('liveIndicator');
-
-    pill.className = `session-status-pill ${state.status.toLowerCase()}`;
-    txt.textContent = state.status;
-
-    if (state.status === 'RUNNING') {
-        timer.style.display = 'flex';
-        liveInd.style.display = 'inline-flex';
-        btn.querySelector('i').className = 'fa-solid fa-stop';
-        btnTxt.textContent = 'Stop Session';
-        btn.className = 'btn btn-danger btn-glow';
-
-        if (!timerInterval) {
-            const base = Date.now() - (state.uptime * 1000);
-            timerInterval = setInterval(() => {
-                document.getElementById('sessionTimeDisplay').textContent =
-                    fmtDuration((Date.now() - base) / 1000);
-            }, 1000);
+    /* ==========================================================
+       1. SERVER-SENT EVENTS (SSE) STREAMING
+       ========================================================== */
+    initSSE() {
+        if (this.eventSource) {
+            this.eventSource.close();
         }
-    } else {
-        timer.style.display = 'none';
-        liveInd.style.display = 'none';
-        btn.querySelector('i').className = 'fa-solid fa-play';
-        btnTxt.textContent = 'Start Session';
-        btn.className = 'btn btn-primary btn-glow';
 
-        if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-        document.getElementById('sessionTimeDisplay').textContent = '00:00:00';
-    }
-}
+        const badge = document.getElementById('liveConnectionBadge');
+        this.eventSource = new EventSource('/api/stream');
 
-// ─── Metrics ──────────────────────────────────────────────────
-function updateMetrics(s) {
-    const kbps  = s.total_speed_kbps || 0;
-    const mbps  = s.total_speed_mbps || 0;
-    const dataMb = s.total_data_mb   || 0;
-    const count = s.target_count     || 0;
+        this.eventSource.onopen = () => {
+            if (badge) {
+                badge.innerHTML = `<span class="status-dot"></span><span class="status-text">SSE Live Stream</span>`;
+            }
+        };
 
-    document.getElementById('statThroughput').innerHTML =
-        kbps >= 1000
-        ? `${mbps.toFixed(2)} <span class="unit">Mbps</span>`
-        : `${kbps.toFixed(1)} <span class="unit">KB/s</span>`;
-    document.getElementById('statThroughputMbps').textContent = `${fmtMbps(mbps)} total speed`;
-    document.getElementById('statDataThrottled').innerHTML =
-        `${dataMb.toFixed(1)} <span class="unit">MB</span>`;
-    document.getElementById('statTargets').textContent = count;
-    document.getElementById('statLimit').innerHTML =
-        state.status === 'RUNNING'
-        ? `${state.limit_mbps} <span class="unit">Mbps</span>`
-        : '—';
+        this.eventSource.onmessage = (event) => {
+            try {
+                const payload = JSON.parse(event.data);
+                this.handleSSEEvent(payload);
+            } catch (e) {
+                // Keepalive heartbeat
+            }
+        };
 
-    // Speed history sparkline
-    if (state.status === 'RUNNING') {
-        state.speedHistory.push(kbps);
-        if (state.speedHistory.length > 60) state.speedHistory.shift();
-        drawSpeedChart();
-        document.getElementById('speedChartCard').style.display = '';
-    } else {
-        document.getElementById('speedChartCard').style.display = 'none';
-    }
-}
-
-// ─── Speed Chart (canvas sparkline) ──────────────────────────
-function drawSpeedChart() {
-    const canvas = document.getElementById('speedChart');
-    const ctx    = canvas.getContext('2d');
-    const W = canvas.offsetWidth; const H = 80;
-    canvas.width = W; canvas.height = H;
-
-    const data = state.speedHistory;
-    const max  = Math.max(...data, 1);
-
-    ctx.clearRect(0,0,W,H);
-
-    // Gradient fill
-    const grad = ctx.createLinearGradient(0,0,0,H);
-    grad.addColorStop(0, 'rgba(99,179,237,0.35)');
-    grad.addColorStop(1, 'rgba(99,179,237,0)');
-
-    ctx.beginPath();
-    ctx.moveTo(0, H);
-    data.forEach((v, i) => {
-        const x = (i / (data.length-1)) * W;
-        const y = H - (v / max) * (H - 6);
-        if (i === 0) ctx.lineTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.lineTo(W, H);
-    ctx.closePath();
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    // Line
-    ctx.beginPath();
-    data.forEach((v, i) => {
-        const x = (i / (data.length-1)) * W;
-        const y = H - (v / max) * (H - 6);
-        i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
-    });
-    ctx.strokeStyle = '#63b3ed';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-}
-
-// ─── Targets Table ────────────────────────────────────────────
-function renderTargetsTable() {
-    const tbody = document.getElementById('targetsTableBody');
-
-    if (state.status !== 'RUNNING' || !state.targets.length) {
-        tbody.innerHTML = `<tr class="empty-row"><td colspan="7">
-            <i class="fa-solid fa-moon"></i>
-            No active session — start one from the toolbar above
-        </td></tr>`;
-        return;
+        this.eventSource.onerror = () => {
+            if (badge) {
+                badge.innerHTML = `<span class="status-dot" style="background: var(--accent-amber); box-shadow: 0 0 10px var(--accent-amber);"></span><span class="status-text">Reconnecting...</span>`;
+            }
+        };
     }
 
-    tbody.innerHTML = state.targets.map(tgt => {
-        const ip     = tgt.ip || '-';
-        const tel    = state.telemetry[ip] || {};
-        const speedMbps = tel.speed_mbps || 0;
-        const totalB = tel.total_bytes || 0;
-        const vendor = tgt.vendor || 'Unknown';
-        const host   = tgt.hostname || '';
-        const label  = host ? `${host} (${vendor})` : vendor;
-        const limitMb = state.limit_mbps;
+    handleSSEEvent(payload) {
+        const type = payload.type;
+        const data = payload.data || payload.state;
 
-        const pct = Math.min(speedMbps / limitMb, 1);
-        let statusBadge = `<span class="badge badge-idle">Idle</span>`;
-        if (pct > 0.75) statusBadge = `<span class="badge badge-heavy">● Heavy</span>`;
-        else if (pct > 0.05) statusBadge = `<span class="badge badge-active">● Active</span>`;
+        switch (type) {
+            case "init":
+                if (payload.state) this.updateUIWithState(payload.state);
+                break;
 
-        return `<tr>
-            <td class="ip-cell">${ip}</td>
-            <td>${label.substring(0,28)}</td>
-            <td class="speed-cell">${speedMbps.toFixed(2)} Mbps</td>
-            <td>${limitMb} Mbps</td>
-            <td>${fmtBytes(totalB)}</td>
-            <td>${statusBadge}</td>
-            <td>
-                <button class="btn btn-danger btn-sm" onclick="unthrottleTarget('${ip}')">
-                    <i class="fa-solid fa-xmark"></i>
-                </button>
-            </td>
-        </tr>`;
-    }).join('');
-}
+            case "devices_discovered":
+                if (data.new_devices && data.new_devices.length) {
+                    this.showToast(`📡 Discovered ${data.new_devices.length} new device(s) on network.`, 'info');
+                }
+                if (data.all_devices) {
+                    this.state.devices = data.all_devices;
+                    this.renderDashboardTable();
+                    this.renderScannerTable();
+                }
+                break;
 
-async function unthrottleTarget(ip) {
-    const r = await api('POST', '/api/target/toggle', { ip, should_throttle: false });
-    if (r.success) { toast(`Stopped throttling ${ip}`, 'success'); applyState(r.state); }
-    else toast(r.error, 'error');
-}
+            case "device_auto_throttled":
+                this.state.autoThrottledCount += 1;
+                const dev = data.device || {};
+                const limit = data.limit_mbps || this.state.limit_mbps;
+                this.showToast(`⚡ AUTO-THROTTLED: ${dev.ip || 'Device'} (${dev.vendor || dev.mac || 'Unknown'}) capped at ${limit} Mbps!`, 'error');
+                this.updateRadarBanner();
+                this.fetchStatus();
+                break;
 
-// ─── Devices Table ────────────────────────────────────────────
-function renderDevicesTable() {
-    const tbody = document.getElementById('devicesTableBody');
+            case "devices_updated":
+                if (data.devices) {
+                    this.state.devices = data.devices;
+                    this.renderDashboardTable();
+                    this.renderScannerTable();
+                }
+                break;
 
-    if (!state.devices.length) {
-        tbody.innerHTML = `<tr class="empty-row"><td colspan="7">
-            <i class="fa-solid fa-radar"></i> No devices discovered yet
-        </td></tr>`;
-        updateBulkActions();
-        return;
-    }
+            case "target_toggled":
+                if (data.state) this.updateUIWithState(data.state);
+                this.showToast(`Target ${data.ip} ${data.is_throttled ? 'throttling activated' : 'throttling removed'}.`, data.is_throttled ? 'success' : 'info');
+                break;
 
-    const throttledIPs = new Set((state.targets||[]).map(t=>t.ip||t));
+            case "limit_updated":
+                this.state.limit_mbps = data.limit_mbps;
+                document.getElementById('statBandwidthLimit').innerHTML = `${this.state.limit_mbps} <span class="unit">Mbps</span>`;
+                const radarLimit = document.getElementById('radarLimitVal');
+                if (radarLimit) radarLimit.textContent = this.state.limit_mbps;
+                this.showToast(`⚡ Live bandwidth limit adjusted to ${this.state.limit_mbps} Mbps!`, 'success');
+                break;
 
-    tbody.innerHTML = state.devices.map(dev => {
-        const ip     = dev.ip || '-';
-        const mac    = dev.mac || 'Unknown';
-        const vendor = dev.vendor || 'Unknown';
-        const host   = dev.hostname || '';
-        const isThrottled = throttledIPs.has(ip);
+            case "session_started":
+                this.state.autoThrottledCount = 0;
+                this.updateUIWithState(data);
+                this.showToast('🚀 Bandwidth shaping session is now ACTIVE.', 'success');
+                break;
 
-        const statusBadge = isThrottled
-            ? `<span class="badge badge-bl">Throttled</span>`
-            : `<span class="badge badge-idle">Free</span>`;
+            case "session_stopped":
+                this.state.autoThrottledCount = 0;
+                this.updateUIWithState(data);
+                this.showToast('🛑 Session stopped. Network traffic restored.', 'info');
+                break;
 
-        const actionBtn = state.status === 'RUNNING'
-            ? (isThrottled
-                ? `<button class="btn btn-success btn-sm" onclick="toggleDevice('${ip}', false)">
-                     <i class="fa-solid fa-shield"></i> Release
-                   </button>`
-                : `<button class="btn btn-danger btn-sm" onclick="toggleDevice('${ip}', true)">
-                     <i class="fa-solid fa-bolt"></i> Throttle
-                   </button>`)
-            : '';
-
-        return `<tr>
-            <td><input type="checkbox" class="dev-check" value="${ip}" onchange="updateBulkActions()"></td>
-            <td class="ip-cell">${ip}</td>
-            <td class="mac-cell">${mac}</td>
-            <td>${vendor}</td>
-            <td>${host}</td>
-            <td>${statusBadge}</td>
-            <td>${actionBtn}</td>
-        </tr>`;
-    }).join('');
-
-    updateBulkActions();
-}
-
-async function toggleDevice(ip, shouldThrottle) {
-    if (state.status !== 'RUNNING') { toast('No session running', 'error'); return; }
-    const r = await api('POST', '/api/target/toggle', { ip, should_throttle: shouldThrottle });
-    if (r.success) { applyState(r.state); toast(r.message, 'success'); }
-    else toast(r.error, 'error');
-}
-
-function updateBulkActions() {
-    const checked = document.querySelectorAll('.dev-check:checked');
-    const panel   = document.getElementById('bulkActions');
-    panel.style.display = checked.length > 0 ? 'flex' : 'none';
-    document.getElementById('selectedCount').textContent = `${checked.length} selected`;
-}
-
-document.getElementById('selectAllDevices')?.addEventListener('change', function() {
-    document.querySelectorAll('.dev-check').forEach(c => c.checked = this.checked);
-    updateBulkActions();
-});
-
-document.getElementById('btnThrottleSelected')?.addEventListener('click', async () => {
-    if (state.status !== 'RUNNING') { toast('Start a session first', 'error'); return; }
-    const ips = [...document.querySelectorAll('.dev-check:checked')].map(c=>c.value);
-    for (const ip of ips) {
-        await api('POST', '/api/target/toggle', { ip, should_throttle: true });
-    }
-    const r = await api('GET', '/api/status');
-    if (r.success) { applyState(r.data); toast(`Throttling ${ips.length} device(s)`, 'success'); }
-});
-
-document.getElementById('btnWhitelistSelected')?.addEventListener('click', async () => {
-    const ips = [...document.querySelectorAll('.dev-check:checked')].map(c=>c.value);
-    if (!ips.length) return;
-    for (const ip of ips) {
-        const dev = state.devices.find(d=>d.ip===ip);
-        if (dev?.mac) {
-            await api('POST', '/api/rules', { category:'whitelist', mac: dev.mac, name: dev.vendor||'' });
+            case "cache_cleared":
+                this.state.devices = [];
+                this.state.selectedIps.clear();
+                this.renderDashboardTable();
+                this.renderScannerTable();
+                break;
         }
     }
-    toast(`Whitelisted ${ips.length} device(s)`, 'success');
-    loadRules();
-});
 
-// ─── Scan ─────────────────────────────────────────────────────
-async function doScan() {
-    document.getElementById('btnRescanTop').innerHTML = '<i class="fa-solid fa-spinner spin"></i> Scanning…';
-    document.getElementById('btnRescanDevices').innerHTML = '<i class="fa-solid fa-spinner spin"></i> Scanning…';
-    try {
-        const r = await api('POST', '/api/scan', {
-            interface: state.interface,
-            router_ip: state.router_ip
+    /* ==========================================================
+       2. EVENT BINDINGS
+       ========================================================== */
+    bindEvents() {
+        // Tab Navigation
+        document.querySelectorAll('.nav-item').forEach(button => {
+            button.addEventListener('click', () => {
+                const targetTab = button.dataset.tab;
+                this.switchTab(targetTab);
+            });
         });
-        if (r.success) {
-            state.devices = r.devices || [];
-            document.getElementById('scanHint').style.display = 'none';
-            renderDevicesTable();
-            toast(`Found ${r.count} device(s)`, 'success');
-        } else toast(r.error, 'error');
-    } finally {
-        document.getElementById('btnRescanTop').innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Scan';
-        document.getElementById('btnRescanDevices').innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Rescan';
-    }
-}
 
-document.getElementById('btnRescanTop')?.addEventListener('click', doScan);
-document.getElementById('btnRescanDevices')?.addEventListener('click', doScan);
+        // Mode Toggles (Blacklist vs Whitelist)
+        const btnBl = document.getElementById('btnModeBlacklist');
+        const btnWl = document.getElementById('btnModeWhitelist');
+        if (btnBl) btnBl.addEventListener('click', () => this.setMode('blacklist'));
+        if (btnWl) btnWl.addEventListener('click', () => this.setMode('whitelist'));
 
-document.getElementById('btnClearCache')?.addEventListener('click', async () => {
-    const r = await api('POST', '/api/devices/clear');
-    if (r.success) { state.devices = []; renderDevicesTable(); toast('Cache cleared', 'success'); }
-    else toast(r.error, 'error');
-});
+        // Speed Preset Pills
+        document.querySelectorAll('.preset-pill').forEach(pill => {
+            pill.addEventListener('click', () => {
+                document.querySelectorAll('.preset-pill').forEach(p => p.classList.remove('active'));
+                pill.classList.add('active');
+                const customInp = document.getElementById('customSpeedInput');
+                if (customInp) customInp.value = '';
+                const newLimit = parseFloat(pill.dataset.speed);
+                this.handleLimitSelection(newLimit);
+            });
+        });
 
-// ─── Session Control ──────────────────────────────────────────
-document.getElementById('btnSessionControl')?.addEventListener('click', async () => {
-    if (state.status === 'RUNNING') {
-        const r = await api('POST', '/api/session/stop');
-        if (r.success) { applyState(r.state); toast('Session stopped', 'success'); }
-        else toast(r.error, 'error');
-    } else {
-        openStartModal();
-    }
-});
-
-async function openStartModal() {
-    // Load interfaces
-    const ifData = await api('GET', '/api/interfaces');
-    const ifSelect = document.getElementById('modalInterface');
-    ifSelect.innerHTML = (ifData.interfaces || []).map(i =>
-        `<option value="${i}" ${i === state.interface ? 'selected' : ''}>${i}</option>`
-    ).join('');
-    document.getElementById('modalRouter').value = state.router_ip || ifData.default_gateway || '';
-    document.getElementById('modalLimit').value  = state.limit_mbps;
-
-    renderModalTargetList();
-    document.getElementById('modalMode').value = 'blacklist';
-    handleModalModeChange();
-
-    openModal('modalStartSession');
-}
-
-document.getElementById('modalMode')?.addEventListener('change', handleModalModeChange);
-function handleModalModeChange() {
-    const mode = document.getElementById('modalMode').value;
-    document.getElementById('targetSelectGroup').style.display    = mode==='blacklist' ? '' : 'none';
-    document.getElementById('whitelistSelectGroup').style.display = mode==='whitelist' ? '' : 'none';
-}
-
-function renderModalTargetList() {
-    const tgtList = document.getElementById('modalTargetList');
-    const wlList  = document.getElementById('modalWhitelistList');
-
-    if (!state.devices.length) {
-        tgtList.innerHTML = wlList.innerHTML = '<p class="no-devices-msg">No devices. Click Scan first.</p>';
-        return;
-    }
-
-    const makeItems = (listEl) => {
-        listEl.innerHTML = state.devices.map(dev => {
-            const ip  = dev.ip || '-';
-            const mac = dev.mac || '';
-            const label = dev.hostname ? `${dev.hostname} (${dev.vendor||'?'})` : (dev.vendor||'Unknown');
-            return `<label class="target-item">
-                <input type="checkbox" value="${ip}" data-mac="${mac}" data-vendor="${dev.vendor||''}">
-                <div class="target-item-info">
-                    <div class="target-item-ip">${ip}</div>
-                    <div class="target-item-label">${mac} — ${label}</div>
-                </div>
-            </label>`;
-        }).join('');
-    };
-    makeItems(tgtList);
-    makeItems(wlList);
-}
-
-document.querySelectorAll('.modal-preset').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.getElementById('modalLimit').value = btn.dataset.val;
-    });
-});
-
-document.getElementById('confirmStartSession')?.addEventListener('click', async () => {
-    const iface  = document.getElementById('modalInterface').value;
-    const router = document.getElementById('modalRouter').value.trim();
-    const mode   = document.getElementById('modalMode').value;
-    const limit  = parseFloat(document.getElementById('modalLimit').value) || 1.0;
-
-    if (!iface || !router) { toast('Interface and router IP required', 'error'); return; }
-
-    let targets = [], whitelisted = [];
-    if (mode === 'blacklist') {
-        targets = [...document.querySelectorAll('#modalTargetList input:checked')].map(c => ({
-            ip: c.value, mac: c.dataset.mac, vendor: c.dataset.vendor
-        }));
-        if (!targets.length) { toast('Select at least one target', 'error'); return; }
-    } else {
-        whitelisted = [...document.querySelectorAll('#modalWhitelistList input:checked')].map(c => ({
-            ip: c.value, mac: c.dataset.mac, vendor: c.dataset.vendor
-        }));
-    }
-
-    const r = await api('POST', '/api/session/start', {
-        interface: iface, router_ip: router, mode,
-        targets, whitelisted, limit_mbps: limit
-    });
-
-    if (r.success) {
-        closeModal('modalStartSession');
-        applyState(r.state);
-        toast('Session started successfully!', 'success');
-    } else toast(r.error || 'Failed to start session', 'error');
-});
-
-// ─── Add Device ───────────────────────────────────────────────
-document.getElementById('btnManualAddTop')?.addEventListener('click', () => openModal('modalAddDevice'));
-document.getElementById('btnManualAdd')?.addEventListener('click',    () => openModal('modalAddDevice'));
-
-document.getElementById('confirmAddDevice')?.addEventListener('click', async () => {
-    const ip     = document.getElementById('manualIP').value.trim();
-    const mac    = document.getElementById('manualMAC').value.trim();
-    const vendor = document.getElementById('manualVendor').value.trim() || 'Manual Entry';
-
-    if (!ip && !mac) { toast('Enter IP or MAC', 'error'); return; }
-
-    const r = await api('POST', '/api/devices/manual', { ip, mac, vendor });
-    if (r.success) {
-        state.devices = (await api('GET', '/api/status')).data?.devices || state.devices;
-        renderDevicesTable();
-        renderModalTargetList();
-        closeModal('modalAddDevice');
-        document.getElementById('manualIP').value  = '';
-        document.getElementById('manualMAC').value = '';
-        document.getElementById('manualVendor').value = '';
-        toast('Device added', 'success');
-    } else toast(r.error, 'error');
-});
-
-// ─── Rules ────────────────────────────────────────────────────
-async function loadRules() {
-    const r = await api('GET', '/api/rules');
-    if (r.success) {
-        state.rules = r.rules;
-        renderRulesTable();
-    }
-}
-
-function renderRulesTable() {
-    const tbody = document.getElementById('rulesTableBody');
-    const wl = state.rules.whitelist || {};
-    const bl = state.rules.blacklist || {};
-
-    const rows = [
-        ...Object.entries(wl).map(([mac, name]) => ({ cat:'whitelist', mac, name })),
-        ...Object.entries(bl).map(([mac, name]) => ({ cat:'blacklist', mac, name })),
-    ];
-
-    if (!rows.length) {
-        tbody.innerHTML = `<tr class="empty-row"><td colspan="4">
-            <i class="fa-solid fa-shield"></i> No global rules defined
-        </td></tr>`;
-        return;
-    }
-
-    tbody.innerHTML = rows.map(({cat, mac, name}) => `<tr>
-        <td>${cat==='whitelist'
-            ? '<span class="badge badge-wl">WHITELIST</span>'
-            : '<span class="badge badge-bl">BLACKLIST</span>'}</td>
-        <td class="mac-cell">${mac}</td>
-        <td>${name || '<span style="color:var(--text-muted)">—</span>'}</td>
-        <td>
-            <button class="btn btn-danger btn-sm" onclick="deleteRule('${cat}','${mac}')">
-                <i class="fa-solid fa-trash"></i>
-            </button>
-        </td>
-    </tr>`).join('');
-}
-
-async function deleteRule(category, mac) {
-    const r = await api('DELETE', `/api/rules/${category}/${mac}`);
-    if (r.success) { state.rules = r.rules; renderRulesTable(); toast('Rule removed', 'success'); }
-    else toast(r.error, 'error');
-}
-
-document.getElementById('btnAddRule')?.addEventListener('click', () => openModal('modalAddRule'));
-
-document.getElementById('confirmAddRule')?.addEventListener('click', async () => {
-    const category = document.getElementById('ruleCategory').value;
-    const mac      = document.getElementById('ruleMAC').value.trim().toLowerCase();
-    const name     = document.getElementById('ruleName').value.trim();
-
-    if (!mac) { toast('MAC address required', 'error'); return; }
-
-    const r = await api('POST', '/api/rules', { category, mac, name });
-    if (r.success) {
-        state.rules = r.rules;
-        renderRulesTable();
-        closeModal('modalAddRule');
-        document.getElementById('ruleMAC').value  = '';
-        document.getElementById('ruleName').value = '';
-        toast('Rule saved', 'success');
-    } else toast(r.error, 'error');
-});
-
-// ─── Settings ─────────────────────────────────────────────────
-async function loadSettings() {
-    const r = await api('GET', '/api/interfaces');
-    const sel = document.getElementById('settingInterface');
-    sel.innerHTML = (r.interfaces||[]).map(i =>
-        `<option value="${i}" ${i===state.interface?'selected':''}>${i}</option>`
-    ).join('');
-    document.getElementById('settingRouter').value = state.router_ip || r.default_gateway || '';
-    document.getElementById('settingLimit').value  = state.limit_mbps;
-    document.getElementById('settingMode').value   = 'blacklist';
-}
-
-document.getElementById('btnSaveNetworkSettings')?.addEventListener('click', () => {
-    state.interface = document.getElementById('settingInterface').value;
-    state.router_ip = document.getElementById('settingRouter').value.trim();
-    toast('Settings saved', 'success');
-});
-
-document.getElementById('btnApplyLimit')?.addEventListener('click', async () => {
-    const lim = parseFloat(document.getElementById('settingLimit').value);
-    if (!lim || lim <= 0) { toast('Enter a valid limit', 'error'); return; }
-    const r = await api('POST', '/api/session/limit', { limit_mbps: lim });
-    if (r.success) { state.limit_mbps = lim; toast(`Limit updated to ${lim} Mbps`, 'success'); }
-    else toast(r.error, 'error');
-});
-
-document.querySelectorAll('.preset-btn:not(.modal-preset)').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.getElementById('settingLimit').value = btn.dataset.val;
-    });
-});
-
-// ─── Telemetry Polling ────────────────────────────────────────
-setInterval(async () => {
-    if (state.status !== 'RUNNING') return;
-    try {
-        const r = await api('GET', '/api/telemetry');
-        if (r.success) {
-            state.telemetry = r.telemetry || {};
-            updateMetrics(r);
-            renderTargetsTable();
+        // Custom Speed Input
+        const customInput = document.getElementById('customSpeedInput');
+        if (customInput) {
+            customInput.addEventListener('input', (e) => {
+                const val = parseFloat(e.target.value);
+                if (val > 0) {
+                    document.querySelectorAll('.preset-pill').forEach(p => p.classList.remove('active'));
+                    this.handleLimitSelection(val);
+                }
+            });
         }
-    } catch {}
-}, 1000);
 
-// ─── Init ─────────────────────────────────────────────────────
-(async () => {
-    const r = await api('GET', '/api/status');
-    if (r.success) applyState(r.data);
-    await loadSettings();
-})();
+        // Live Apply Button for Running Sessions
+        const btnApplyLive = document.getElementById('btnApplyLiveLimit');
+        if (btnApplyLive) {
+            btnApplyLive.addEventListener('click', () => this.applyLiveLimit());
+        }
+
+        // Session Control Button
+        const btnSession = document.getElementById('btnSessionControl');
+        if (btnSession) {
+            btnSession.addEventListener('click', () => this.toggleSession());
+        }
+
+        // Rescan and Add Device Buttons
+        const btnRescanTop = document.getElementById('btnRescanTop');
+        if (btnRescanTop) btnRescanTop.addEventListener('click', () => this.triggerScan());
+
+        const btnScanTab = document.getElementById('btnScanDevicesTab');
+        if (btnScanTab) btnScanTab.addEventListener('click', () => this.triggerScan());
+
+        const btnManualTop = document.getElementById('btnManualAddTop');
+        if (btnManualTop) btnManualTop.addEventListener('click', () => this.openModal('manualDeviceModal'));
+
+        const btnManualTab = document.getElementById('btnManualDeviceTab');
+        if (btnManualTab) btnManualTab.addEventListener('click', () => this.openModal('manualDeviceModal'));
+
+        const btnClearTab = document.getElementById('btnClearCacheTab');
+        if (btnClearTab) btnClearTab.addEventListener('click', () => this.clearCache());
+
+        // Submit Manual Device
+        const btnSubMan = document.getElementById('btnSubmitManualDevice');
+        if (btnSubMan) btnSubMan.addEventListener('click', () => this.submitManualDevice());
+
+        // Submit Rule
+        const btnSubRule = document.getElementById('btnSubmitRule');
+        if (btnSubRule) btnSubRule.addEventListener('click', () => this.submitRule());
+
+        // Save Settings
+        const btnSaveSet = document.getElementById('btnSaveSettings');
+        if (btnSaveSet) btnSaveSet.addEventListener('click', () => this.saveSettings());
+
+        // Select All Checkbox
+        const selectAllCb = document.getElementById('selectAllCheckbox');
+        if (selectAllCb) {
+            selectAllCb.addEventListener('change', (e) => {
+                const isChecked = e.target.checked;
+                document.querySelectorAll('.device-row-check').forEach(cb => {
+                    cb.checked = isChecked;
+                    const ip = cb.dataset.ip;
+                    if (isChecked) {
+                        this.state.selectedIps.add(ip);
+                    } else {
+                        this.state.selectedIps.delete(ip);
+                    }
+                });
+            });
+        }
+    }
+
+    handleLimitSelection(newLimit) {
+        this.state.limit_mbps = newLimit;
+        const statLim = document.getElementById('statBandwidthLimit');
+        if (statLim) statLim.innerHTML = `${newLimit} <span class="unit">Mbps</span>`;
+        const radarLim = document.getElementById('radarLimitVal');
+        if (radarLim) radarLim.textContent = newLimit;
+
+        const btnApplyLive = document.getElementById('btnApplyLiveLimit');
+        if (btnApplyLive) {
+            if (this.state.status === "RUNNING") {
+                btnApplyLive.style.display = 'inline-flex';
+            } else {
+                btnApplyLive.style.display = 'none';
+            }
+        }
+    }
+
+    async applyLiveLimit() {
+        try {
+            const res = await fetch('/api/session/limit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ limit_mbps: this.state.limit_mbps })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.showToast(`Applied limit: ${this.state.limit_mbps} Mbps live!`, 'success');
+                const btnApplyLive = document.getElementById('btnApplyLiveLimit');
+                if (btnApplyLive) btnApplyLive.style.display = 'none';
+            } else {
+                this.showToast(data.error || 'Failed to update live limit.', 'error');
+            }
+        } catch (e) {
+            this.showToast('Error applying live limit.', 'error');
+        }
+    }
+
+    switchTab(tabId) {
+        document.querySelectorAll('.nav-item').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.tab === tabId);
+        });
+        document.querySelectorAll('.tab-pane').forEach(pane => {
+            pane.classList.toggle('active', pane.id === `pane-${tabId}`);
+        });
+
+        if (tabId === 'devices') {
+            this.renderScannerTable();
+        } else if (tabId === 'rules') {
+            this.renderRules();
+        }
+    }
+
+    setMode(mode) {
+        this.state.mode = mode;
+        const btnBl = document.getElementById('btnModeBlacklist');
+        const btnWl = document.getElementById('btnModeWhitelist');
+        if (btnBl) btnBl.classList.toggle('active', mode === 'blacklist');
+        if (btnWl) btnWl.classList.toggle('active', mode === 'whitelist');
+        const subtitle = document.getElementById('statModeSubtitle');
+        if (subtitle) subtitle.textContent = `Mode: ${mode.charAt(0).toUpperCase() + mode.slice(1)}`;
+
+        // Clear selection to reset defaults for the newly chosen mode
+        this.state.selectedIps.clear();
+        this.updateRadarBanner();
+        this.renderDashboardTable();
+    }
+
+    updateRadarBanner() {
+        const banner = document.getElementById('dynamicRadarBanner');
+        if (!banner) return;
+
+        if (this.state.status === "RUNNING" && this.state.mode === "whitelist") {
+            banner.style.display = 'flex';
+            const radarLim = document.getElementById('radarLimitVal');
+            const radarCount = document.getElementById('radarThrottledCount');
+            if (radarLim) radarLim.textContent = this.state.limit_mbps;
+            if (radarCount) radarCount.textContent = this.state.autoThrottledCount;
+        } else {
+            banner.style.display = 'none';
+        }
+    }
+
+    async loadInterfaces() {
+        try {
+            const res = await fetch('/api/interfaces');
+            const data = await res.json();
+            if (data.success) {
+                const select = document.getElementById('settingInterface');
+                if (select) {
+                    select.innerHTML = '';
+                    data.interfaces.forEach(iface => {
+                        const opt = document.createElement('option');
+                        opt.value = iface;
+                        opt.textContent = iface;
+                        if (iface === data.default_interface) opt.selected = true;
+                        select.appendChild(opt);
+                    });
+                }
+
+                this.state.interface = data.default_interface;
+                this.state.router_ip = data.default_gateway || '192.168.1.1';
+                const routerInp = document.getElementById('settingRouterIp');
+                if (routerInp) routerInp.value = this.state.router_ip;
+            }
+        } catch (e) {
+            console.error("Failed to load interfaces:", e);
+        }
+    }
+
+    async loadRules() {
+        try {
+            const res = await fetch('/api/rules');
+            const data = await res.json();
+            if (data.success) {
+                this.state.rules = data.rules;
+                this.renderRules();
+            }
+        } catch (e) {
+            console.error("Failed to load rules:", e);
+        }
+    }
+
+    async fetchStatus() {
+        try {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            if (data.success) {
+                this.updateUIWithState(data.data);
+            }
+        } catch (e) {
+            console.error("Failed to fetch status:", e);
+        }
+    }
+
+    updateUIWithState(state) {
+        this.state.status = state.status;
+        this.state.devices = state.devices || [];
+        this.state.targets = state.targets || [];
+        this.state.whitelisted = state.whitelisted || [];
+        this.state.telemetry = state.telemetry || [];
+        this.state.uptime = state.uptime || 0;
+        if (state.limit_mbps) this.state.limit_mbps = state.limit_mbps;
+        if (state.operational_mode) this.state.mode = state.operational_mode;
+
+        // Update Session Status Pill
+        const pill = document.getElementById('sessionStatusPill');
+        const text = document.getElementById('sessionStatusText');
+        const btn = document.getElementById('btnSessionControl');
+        const timer = document.getElementById('sessionTimer');
+        const btnApplyLive = document.getElementById('btnApplyLiveLimit');
+
+        if (state.status === "RUNNING") {
+            if (pill) pill.className = 'session-status-pill running';
+            if (text) text.textContent = 'ACTIVE';
+            if (btn) {
+                btn.className = 'btn btn-danger btn-glow';
+                btn.innerHTML = '<i class="fa-solid fa-stop"></i> <span>Stop Session</span>';
+            }
+            if (timer) timer.style.display = 'flex';
+        } else if (state.status === "SCANNING") {
+            if (pill) pill.className = 'session-status-pill idle';
+            if (text) text.textContent = 'SCANNING';
+            if (btn) {
+                btn.className = 'btn btn-secondary';
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> <span>Scanning...</span>';
+            }
+            if (timer) timer.style.display = 'none';
+            if (btnApplyLive) btnApplyLive.style.display = 'none';
+        } else {
+            if (pill) pill.className = 'session-status-pill idle';
+            if (text) text.textContent = 'IDLE';
+            if (btn) {
+                btn.className = 'btn btn-primary btn-glow';
+                btn.innerHTML = '<i class="fa-solid fa-play"></i> <span>Start Session</span>';
+            }
+            if (timer) timer.style.display = 'none';
+            if (btnApplyLive) btnApplyLive.style.display = 'none';
+        }
+
+        // Mode Pill Sync
+        const btnBl = document.getElementById('btnModeBlacklist');
+        const btnWl = document.getElementById('btnModeWhitelist');
+        if (btnBl) btnBl.classList.toggle('active', this.state.mode === 'blacklist');
+        if (btnWl) btnWl.classList.toggle('active', this.state.mode === 'whitelist');
+        const subtitle = document.getElementById('statModeSubtitle');
+        if (subtitle) subtitle.textContent = `Mode: ${this.state.mode.charAt(0).toUpperCase() + this.state.mode.slice(1)}`;
+
+        // Metrics
+        const statThroughput = document.getElementById('statThroughput');
+        if (statThroughput) statThroughput.innerHTML = `${state.total_speed_kbps || '0.0'} <span class="unit">KB/s</span>`;
+        const statThroughputMbps = document.getElementById('statThroughputMbps');
+        if (statThroughputMbps) statThroughputMbps.textContent = `${state.total_speed_mbps || '0.00'} Mbps total speed`;
+        const statTargetCount = document.getElementById('statTargetCount');
+        if (statTargetCount) statTargetCount.textContent = state.target_count || 0;
+        const statLimit = document.getElementById('statBandwidthLimit');
+        if (statLimit) statLimit.innerHTML = `${state.limit_mbps || this.state.limit_mbps} <span class="unit">Mbps</span>`;
+        const statData = document.getElementById('statDataTransferred');
+        if (statData) statData.innerHTML = `${state.total_data_mb || '0.00'} <span class="unit">MB</span>`;
+
+        this.updateRadarBanner();
+        this.renderDashboardTable();
+    }
+
+    /* ==========================================================
+       3. DASHBOARD & LIVE TELEMETRY RENDERING
+       ========================================================== */
+    renderDashboardTable() {
+        const tbody = document.getElementById('devicesTableBody');
+        if (!tbody) return;
+
+        if (!this.state.devices.length) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="8" class="empty-state">
+                        <i class="fa-solid fa-satellite-dish fa-2x"></i>
+                        <p>No active network devices detected. Click "Scan" or "Add Device" above.</p>
+                    </td>
+                </tr>`;
+            return;
+        }
+
+        const teleMap = {};
+        this.state.telemetry.forEach(t => {
+            teleMap[t.ip] = t;
+        });
+
+        // Set of active targets actually being throttled
+        const runningTargetIps = new Set(
+            this.state.targets.map(t => (typeof t === 'string' ? t : t.ip))
+        );
+
+        // Global whitelist MACs
+        const globalWl = this.state.rules.whitelist || {};
+        const globalBl = this.state.rules.blacklist || {};
+
+        const isRunning = this.state.status === "RUNNING";
+        tbody.innerHTML = '';
+
+        this.state.devices.forEach(dev => {
+            const tr = document.createElement('tr');
+            const macLower = (dev.mac || '').toLowerCase();
+            const ip = dev.ip || '-';
+
+            const isGlobalWl = macLower in globalWl;
+            const isGlobalBl = macLower in globalBl;
+            const wlLabel = globalWl[macLower];
+            const blLabel = globalBl[macLower];
+
+            const isCurrentlyThrottled = runningTargetIps.has(ip);
+
+            // Auto select defaults before session starts:
+            // - In Blacklist mode: default check Blacklisted targets
+            // - In Whitelist mode: default check Safe/Whitelisted devices
+            let isChecked = this.state.selectedIps.has(ip);
+            if (!isRunning && !this.state.selectedIps.size) {
+                if (this.state.mode === "blacklist" && isGlobalBl) isChecked = true;
+                if (this.state.mode === "whitelist" && isGlobalWl) isChecked = true;
+                if (isChecked) this.state.selectedIps.add(ip);
+            }
+
+            // Rule Badge
+            let badgeHtml = '<span class="text-muted">-</span>';
+            if (isGlobalWl) {
+                badgeHtml = `<span class="badge badge-whitelist"><i class="fa-solid fa-shield"></i> Safe ${wlLabel ? `(${wlLabel})` : ''}</span>`;
+            } else if (isGlobalBl) {
+                badgeHtml = `<span class="badge badge-blacklist"><i class="fa-solid fa-skull"></i> Target ${blLabel ? `(${blLabel})` : ''}</span>`;
+            }
+
+            // Telemetry stats & speed meter
+            const tele = teleMap[ip];
+            let speedHtml = '<span class="text-muted">0.0 KB/s</span>';
+            let onlineDot = '<span class="status-dot-sm offline" title="Offline / Idle"></span>';
+            let newBadge = '';
+
+            if (isRunning && isCurrentlyThrottled) {
+                const speedKbps = tele ? tele.speed_kbps : 0.0;
+                const speedMbps = tele ? tele.speed_mbps : 0.00;
+                const maxCapKbps = (this.state.limit_mbps * 125.0); // 1 Mbps = 125 KB/s
+                const pct = Math.min(Math.round((speedKbps / Math.max(maxCapKbps, 1)) * 100), 100);
+
+                const isOnline = tele ? tele.is_online : true;
+                onlineDot = isOnline 
+                    ? '<span class="status-dot-sm online" title="Online & Active"></span>'
+                    : '<span class="status-dot-sm offline" title="Probing / Offline"></span>';
+
+                if (tele && tele.is_new) {
+                    newBadge = '<span class="badge-pulse-glow"><i class="fa-solid fa-bolt"></i> AUTO-TRAPPED</span>';
+                    tr.classList.add('row-new-target');
+                }
+
+                speedHtml = `
+                    <div class="live-speed-cell">
+                        <div class="speed-text-row">
+                            <span class="device-speed-pill">${speedKbps} KB/s</span>
+                            <span class="speed-mbps-text">${speedMbps} MB/s (${pct}%)</span>
+                        </div>
+                        <div class="speed-meter-track">
+                            <div class="speed-meter-bar" style="width: ${pct}%;"></div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Status Column & Live Switch
+            let statusToggleHtml = '';
+            if (isRunning) {
+                if (isGlobalWl) {
+                    // Safe devices are protected and bypassed
+                    statusToggleHtml = `
+                        <div class="hot-toggle-wrap">
+                            <span class="badge badge-whitelist"><i class="fa-solid fa-shield-check"></i> SAFE (IMMUNE)</span>
+                        </div>
+                    `;
+                } else {
+                    statusToggleHtml = `
+                        <div class="hot-toggle-wrap">
+                            ${onlineDot}
+                            <label class="switch-toggle" title="Click to hot-toggle throttling for this target">
+                                <input type="checkbox" class="hot-toggle-cb" data-ip="${ip}" ${isCurrentlyThrottled ? 'checked' : ''}>
+                                <span class="slider round"></span>
+                            </label>
+                            ${isCurrentlyThrottled ? '<span class="label-throttled">THROTTLED</span>' : '<span class="label-bypassed">BYPASSED</span>'}
+                            ${newBadge}
+                        </div>
+                    `;
+                }
+            } else {
+                if (this.state.mode === "whitelist") {
+                    statusToggleHtml = isGlobalWl || isChecked
+                        ? `<span class="badge badge-whitelist"><i class="fa-solid fa-shield"></i> Safe / Whitelisted</span>`
+                        : `<span class="badge badge-blacklist"><i class="fa-solid fa-crosshairs"></i> Will Throttle</span>`;
+                } else {
+                    statusToggleHtml = isChecked 
+                        ? `<span class="badge badge-blacklist"><i class="fa-solid fa-crosshairs"></i> Target</span>`
+                        : `<span class="badge badge-idle">Idle</span>`;
+                }
+            }
+
+            // Hostname & Vendor Display
+            let nameHtml = '';
+            if (dev.hostname) {
+                nameHtml = `
+                    <div class="device-name-col">
+                        <span class="device-hostname" title="${dev.hostname}">${dev.hostname}</span>
+                        <span class="device-vendor-sub" title="${dev.vendor || 'Unknown'}">${dev.vendor || 'Unknown'}</span>
+                    </div>
+                `;
+            } else {
+                nameHtml = `<div class="device-name-col"><span class="device-vendor-only" title="${dev.vendor || 'Unknown'}">${dev.vendor || 'Unknown'}</span></div>`;
+            }
+
+            tr.innerHTML = `
+                <td>
+                    <input type="checkbox" class="custom-checkbox device-row-check" data-ip="${ip}" ${isChecked ? 'checked' : ''} ${isRunning ? 'disabled' : ''}>
+                </td>
+                <td>${statusToggleHtml}</td>
+                <td class="device-ip">${ip}</td>
+                <td class="device-mac">${dev.mac || 'Unknown'}</td>
+                <td>${nameHtml}</td>
+                <td>${badgeHtml}</td>
+                <td>${speedHtml}</td>
+                <td style="text-align: right;">
+                    <button class="btn btn-secondary btn-sm" onclick="app.quickAddToRule('${macLower}', '${(dev.vendor || '').replace(/'/g, "\\'")}')" title="Add to global rules">
+                        <i class="fa-solid fa-shield-halved"></i>
+                    </button>
+                </td>
+            `;
+
+            // Checkbox handler
+            const cb = tr.querySelector('.device-row-check');
+            if (cb) {
+                cb.addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        this.state.selectedIps.add(ip);
+                    } else {
+                        this.state.selectedIps.delete(ip);
+                    }
+                    if (!isRunning) {
+                        this.renderDashboardTable();
+                    }
+                });
+            }
+
+            // Live Hot-Toggle Switch handler
+            const toggleCb = tr.querySelector('.hot-toggle-cb');
+            if (toggleCb) {
+                toggleCb.addEventListener('change', (e) => {
+                    const shouldThrottle = e.target.checked;
+                    this.hotToggleTarget(ip, shouldThrottle);
+                });
+            }
+
+            tbody.appendChild(tr);
+        });
+    }
+
+    async hotToggleTarget(ip, shouldThrottle) {
+        try {
+            const res = await fetch('/api/target/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip, should_throttle: shouldThrottle })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.updateUIWithState(data.state);
+                this.showToast(data.message, shouldThrottle ? 'success' : 'info');
+            } else {
+                this.showToast(data.error || 'Failed to toggle target.', 'error');
+                this.renderDashboardTable();
+            }
+        } catch (e) {
+            this.showToast('Network error during target toggle.', 'error');
+            this.renderDashboardTable();
+        }
+    }
+
+    renderScannerTable() {
+        const tbody = document.getElementById('scannerTableBody');
+        if (!tbody) return;
+
+        if (!this.state.devices.length) {
+            tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><p>No devices discovered yet.</p></td></tr>`;
+            return;
+        }
+
+        tbody.innerHTML = '';
+        this.state.devices.forEach(dev => {
+            const tr = document.createElement('tr');
+            let nameHtml = '';
+            if (dev.hostname) {
+                nameHtml = `
+                    <div class="device-name-col">
+                        <span class="device-hostname" title="${dev.hostname}">${dev.hostname}</span>
+                        <span class="device-vendor-sub" title="${dev.vendor || 'Unknown'}">${dev.vendor || 'Unknown'}</span>
+                    </div>
+                `;
+            } else {
+                nameHtml = `<div class="device-name-col"><span class="device-vendor-only" title="${dev.vendor || 'Unknown'}">${dev.vendor || 'Unknown'}</span></div>`;
+            }
+
+            tr.innerHTML = `
+                <td class="device-ip">${dev.ip || '-'}</td>
+                <td class="device-mac">${dev.mac || 'Unknown'}</td>
+                <td>${nameHtml}</td>
+                <td><span class="badge badge-new"><i class="fa-solid fa-wifi"></i> Active</span></td>
+                <td style="text-align: right;">
+                    <button class="btn btn-secondary btn-sm" onclick="app.quickAddToRule('${dev.mac || ''}', '${(dev.vendor || '').replace(/'/g, "\\'")}')">
+                        <i class="fa-solid fa-plus"></i> Rule
+                    </button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    renderRules() {
+        const wlContainer = document.getElementById('whitelistRulesContainer');
+        const blContainer = document.getElementById('blacklistRulesContainer');
+
+        if (!wlContainer || !blContainer) return;
+
+        const wl = this.state.rules.whitelist || {};
+        const bl = this.state.rules.blacklist || {};
+
+        if (!Object.keys(wl).length) {
+            wlContainer.innerHTML = '<div class="empty-state"><p>No global whitelist rules configured.</p></div>';
+        } else {
+            wlContainer.innerHTML = Object.entries(wl).map(([mac, name]) => `
+                <div class="rule-item">
+                    <div>
+                        <div class="rule-mac">${mac}</div>
+                        <div class="rule-name">${name || 'No label'}</div>
+                    </div>
+                    <button class="btn-icon-delete" onclick="app.deleteRule('whitelist', '${mac}')" title="Delete rule">
+                        <i class="fa-solid fa-trash-can"></i>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        if (!Object.keys(bl).length) {
+            blContainer.innerHTML = '<div class="empty-state"><p>No global blacklist rules configured.</p></div>';
+        } else {
+            blContainer.innerHTML = Object.entries(bl).map(([mac, name]) => `
+                <div class="rule-item">
+                    <div>
+                        <div class="rule-mac">${mac}</div>
+                        <div class="rule-name">${name || 'No label'}</div>
+                    </div>
+                    <button class="btn-icon-delete" onclick="app.deleteRule('blacklist', '${mac}')" title="Delete rule">
+                        <i class="fa-solid fa-trash-can"></i>
+                    </button>
+                </div>
+            `).join('');
+        }
+    }
+
+    /* ==========================================================
+       4. SESSION ACTIONS
+       ========================================================== */
+    async toggleSession() {
+        const btn = document.getElementById('btnSessionControl');
+
+        if (this.state.status === "RUNNING") {
+            // Immediate UI feedback
+            this.state.status = "STOPPING";
+            if (btn) {
+                btn.disabled = true;
+                btn.className = 'btn btn-secondary';
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> <span>Stopping...</span>';
+            }
+
+            try {
+                const res = await fetch('/api/session/stop', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    this.showToast('Session stopped successfully.', 'info');
+                    this.updateUIWithState(data.state);
+                } else {
+                    this.showToast(data.error || 'Failed to stop session.', 'error');
+                }
+            } catch (e) {
+                this.showToast('Network error while stopping session.', 'error');
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        } else if (this.state.status !== "STOPPING" && this.state.status !== "SCANNING") {
+            // Selected devices array
+            const selectedDevices = this.state.devices.filter(d => this.state.selectedIps.has(d.ip));
+            const globalWlMacs = new Set(Object.keys(this.state.rules.whitelist || {}).map(m => m.toLowerCase()));
+
+            let targets = [];
+            let whitelisted = [];
+
+            if (this.state.mode === "blacklist") {
+                // In Blacklist mode: throttle selected devices (except any in global whitelist)
+                targets = selectedDevices.filter(d => !globalWlMacs.has((d.mac || '').toLowerCase()));
+                whitelisted = this.state.devices.filter(d => globalWlMacs.has((d.mac || '').toLowerCase()));
+                if (!targets.length) {
+                    this.showToast('Please select at least one device to throttle.', 'error');
+                    return;
+                }
+            } else {
+                // In Whitelist mode:
+                // Safe devices = (all devices with global whitelist MAC) + (all selected devices)
+                const safeMacs = new Set([
+                    ...globalWlMacs,
+                    ...selectedDevices.map(d => (d.mac || '').toLowerCase()).filter(Boolean)
+                ]);
+                const safeIps = new Set(selectedDevices.map(d => d.ip).filter(ip => ip && ip !== '-'));
+
+                whitelisted = this.state.devices.filter(d => {
+                    const mac = (d.mac || '').toLowerCase();
+                    return (mac && safeMacs.has(mac)) || safeIps.has(d.ip);
+                });
+
+                // Targets = all current devices that are NOT in the safe set
+                targets = this.state.devices.filter(d => {
+                    const mac = (d.mac || '').toLowerCase();
+                    return !((mac && safeMacs.has(mac)) || safeIps.has(d.ip));
+                });
+            }
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> <span>Starting...</span>';
+            }
+
+            try {
+                const payload = {
+                    interface: this.state.interface,
+                    router_ip: this.state.router_ip,
+                    mode: this.state.mode,
+                    targets: targets,
+                    whitelisted: whitelisted,
+                    limit_mbps: this.state.limit_mbps
+                };
+
+                const res = await fetch('/api/session/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    this.showToast(data.message || 'Session started!', 'success');
+                    this.updateUIWithState(data.state);
+                } else {
+                    this.showToast(data.error || 'Failed to start session.', 'error');
+                }
+            } catch (e) {
+                this.showToast('Error starting session.', 'error');
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+    }
+
+    async triggerScan() {
+        if (this.isScanning) return;
+        this.isScanning = true;
+        this.showToast('Scanning local network for devices...', 'info');
+
+        try {
+            const res = await fetch('/api/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    interface: this.state.interface,
+                    router_ip: this.state.router_ip
+                })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.state.devices = data.devices;
+                this.renderDashboardTable();
+                this.renderScannerTable();
+                this.showToast(`Scan complete: found ${data.count} device(s).`, 'success');
+            } else {
+                this.showToast('Scan failed.', 'error');
+            }
+        } catch (e) {
+            this.showToast('Network error during scan.', 'error');
+        } finally {
+            this.isScanning = false;
+        }
+    }
+
+    async submitManualDevice() {
+        const ip = document.getElementById('manualDeviceIp').value.trim();
+        const mac = document.getElementById('manualDeviceMac').value.trim();
+        const vendor = document.getElementById('manualDeviceVendor').value.trim();
+
+        if (!ip && !mac) {
+            this.showToast('Please enter an IP address or a MAC address.', 'error');
+            return;
+        }
+
+        try {
+            const res = await fetch('/api/devices/manual', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip, mac, vendor })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.closeModal('manualDeviceModal');
+                document.getElementById('manualDeviceIp').value = '';
+                document.getElementById('manualDeviceMac').value = '';
+                document.getElementById('manualDeviceVendor').value = '';
+                this.showToast(`Added device: ${data.device.ip} (${data.device.mac})`, 'success');
+                await this.fetchStatus();
+            } else {
+                this.showToast(data.error || 'Failed to add manual device.', 'error');
+            }
+        } catch (e) {
+            this.showToast('Error adding manual device.', 'error');
+        }
+    }
+
+    async submitRule() {
+        const category = document.getElementById('ruleCategoryInput').value;
+        const mac = document.getElementById('ruleMacInput').value.trim();
+        const name = document.getElementById('ruleNameInput').value.trim();
+
+        if (!mac) {
+            this.showToast('MAC address is required.', 'error');
+            return;
+        }
+
+        try {
+            const res = await fetch('/api/rules', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ category, mac, name })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.closeModal('addRuleModal');
+                document.getElementById('ruleMacInput').value = '';
+                document.getElementById('ruleNameInput').value = '';
+                this.state.rules = data.rules;
+                this.renderRules();
+                this.renderDashboardTable();
+                this.showToast(`Saved rule for ${mac}`, 'success');
+            } else {
+                this.showToast(data.error || 'Failed to save rule.', 'error');
+            }
+        } catch (e) {
+            this.showToast('Error saving rule.', 'error');
+        }
+    }
+
+    async deleteRule(category, mac) {
+        try {
+            const res = await fetch(`/api/rules/${category}/${encodeURIComponent(mac)}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.success) {
+                this.state.rules = data.rules;
+                this.renderRules();
+                this.renderDashboardTable();
+                this.showToast(`Removed rule for ${mac}`, 'info');
+            }
+        } catch (e) {
+            this.showToast('Failed to delete rule.', 'error');
+        }
+    }
+
+    async clearCache() {
+        if (confirm("Are you sure you want to clear device cache and saved session?")) {
+            try {
+                const res = await fetch('/api/devices/clear', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    this.showToast(data.message, 'success');
+                    await this.fetchStatus();
+                } else {
+                    this.showToast(data.error, 'error');
+                }
+            } catch (e) {
+                this.showToast('Error clearing cache.', 'error');
+            }
+        }
+    }
+
+    async saveSettings() {
+        const iface = document.getElementById('settingInterface').value;
+        const router = document.getElementById('settingRouterIp').value.trim();
+        const limit = parseFloat(document.getElementById('settingDefaultLimit').value) || 1.0;
+
+        this.state.interface = iface;
+        this.state.router_ip = router;
+        this.state.limit_mbps = limit;
+
+        try {
+            const res = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ interface: iface, router_ip: router, default_limit: limit })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.showToast('Settings saved successfully.', 'success');
+            } else {
+                this.showToast(data.error || 'Failed to save settings.', 'error');
+            }
+        } catch (e) {
+            this.showToast('Settings saved locally.', 'success');
+        }
+    }
+
+    quickAddToRule(mac, vendor) {
+        if (!mac || mac === 'Unknown') {
+            this.showToast('Cannot create global rule without a MAC address.', 'error');
+            return;
+        }
+        const macInp = document.getElementById('ruleMacInput');
+        const nameInp = document.getElementById('ruleNameInput');
+        if (macInp) macInp.value = mac;
+        if (nameInp) nameInp.value = vendor;
+        this.openAddRuleModal('whitelist');
+    }
+
+    openAddRuleModal(category) {
+        const catInp = document.getElementById('ruleCategoryInput');
+        if (catInp) catInp.value = category;
+        const title = category === 'whitelist' ? 'Add to Global Whitelist' : 'Add to Global Blacklist';
+        const titleEl = document.getElementById('addRuleModalTitle');
+        if (titleEl) titleEl.innerHTML = `<i class="fa-solid fa-shield cyan"></i> ${title}`;
+        this.openModal('addRuleModal');
+    }
+
+    openModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) modal.classList.add('active');
+    }
+
+    closeModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) modal.classList.remove('active');
+    }
+
+    showToast(message, type = 'info') {
+        const container = document.getElementById('toastContainer');
+        if (!container) return;
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        
+        let icon = 'fa-info-circle';
+        if (type === 'success') icon = 'fa-circle-check';
+        if (type === 'error') icon = 'fa-circle-exclamation';
+
+        toast.innerHTML = `<i class="fa-solid ${icon}"></i> <span>${message}</span>`;
+        container.appendChild(toast);
+
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateX(100%)';
+            setTimeout(() => toast.remove(), 300);
+        }, 4000);
+    }
+
+    startLocalTimer() {
+        // Polling fallback every 1.5s for metrics
+        setInterval(async () => {
+            if (this.state.status === "RUNNING") {
+                try {
+                    const res = await fetch('/api/telemetry');
+                    const data = await res.json();
+                    if (data.success) {
+                        const statThroughput = document.getElementById('statThroughput');
+                        if (statThroughput) statThroughput.innerHTML = `${data.total_speed_kbps || '0.0'} <span class="unit">KB/s</span>`;
+                        const statThroughputMbps = document.getElementById('statThroughputMbps');
+                        if (statThroughputMbps) statThroughputMbps.textContent = `${data.total_speed_mbps || '0.00'} Mbps total speed`;
+                        const statData = document.getElementById('statDataTransferred');
+                        if (statData) statData.innerHTML = `${data.total_data_mb || '0.00'} <span class="unit">MB</span>`;
+                        this.state.telemetry = data.telemetry || [];
+                        this.renderDashboardTable();
+                    }
+                } catch (e) {}
+            }
+        }, 1500);
+
+        // Timer interval
+        this.timerInterval = setInterval(() => {
+            if (this.state.status === "RUNNING") {
+                this.state.uptime += 1;
+                const hrs = String(Math.floor(this.state.uptime / 3600)).padStart(2, '0');
+                const mins = String(Math.floor((this.state.uptime % 3600) / 60)).padStart(2, '0');
+                const secs = String(this.state.uptime % 60).padStart(2, '0');
+                const timeDisp = document.getElementById('sessionTimeDisplay');
+                if (timeDisp) timeDisp.textContent = `${hrs}:${mins}:${secs}`;
+            }
+        }, 1000);
+    }
+}
+
+// Instantiate on load
+let app = null;
+window.addEventListener('DOMContentLoaded', () => {
+    app = new ThrottwinApp();
+    window.app = app;
+});

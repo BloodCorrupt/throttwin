@@ -429,9 +429,10 @@ class ThrottwinEngine:
                     self.targets.append(dev)
                     log.info(f"Auto-trapped new device in whitelist mode: {dev_ip} ({dev_mac})")
 
-                self.broadcast_event("target_added", {
-                    "ip": dev_ip,
+                self.broadcast_event("device_auto_throttled", {
                     "device": dev,
+                    "limit_mbps": self.limit_mbps,
+                    "target_count": len(self.targets),
                     "state": self.get_state()
                 })
 
@@ -439,36 +440,49 @@ class ThrottwinEngine:
 
     def get_state(self):
         with self.lock:
-            uptime = time.time() - self.session_start_time if self.session_start_time else 0.0
+            uptime = int(time.time() - self.session_start_time) if self.session_start_time else 0
 
-            telemetry = {}
-            total_speed_bps = 0.0
-            total_bytes     = 0
+            telemetry_list = []
+            total_speed_kbps = 0.0
+            total_bytes = 0
+
             for ip, shaper in self.shapers.items():
                 speed_mbps = shaper.get_speed_mbps()
-                total_speed_bps += speed_mbps * 1_000_000 / 8
-                total_bytes     += shaper.total_bytes
-                telemetry[ip] = {
-                    "speed_mbps":  round(speed_mbps, 3),
-                    "speed_kbps":  round(speed_mbps * 1000, 1),
+                speed_kbps = round(speed_mbps * 125.0, 1)  # KB/s
+                total_speed_kbps += speed_kbps
+                total_bytes += shaper.total_bytes
+
+                target_dev = next((t for t in self.targets if (t.get("ip") if isinstance(t, dict) else t) == ip), {})
+                mac = target_dev.get("mac", "Unknown") if isinstance(target_dev, dict) else "Unknown"
+                vendor = target_dev.get("vendor", "Unknown") if isinstance(target_dev, dict) else "Unknown"
+                hostname = target_dev.get("hostname", "") if isinstance(target_dev, dict) else ""
+
+                telemetry_list.append({
+                    "ip": ip,
+                    "mac": mac,
+                    "vendor": vendor,
+                    "hostname": hostname,
+                    "speed_kbps": speed_kbps,
+                    "speed_mbps": round(speed_mbps, 2),
                     "total_bytes": shaper.total_bytes,
-                    "mac":         next((t.get("mac","") for t in self.targets if (t.get("ip") if isinstance(t,dict) else t)==ip), ""),
-                    "vendor":      next((t.get("vendor","") for t in self.targets if (t.get("ip") if isinstance(t,dict) else t)==ip), ""),
-                }
+                    "total_mb": round(shaper.total_bytes / (1024 * 1024), 2),
+                    "is_online": True,
+                    "is_new": getattr(shaper, "is_new", False)
+                })
 
             return {
-                "status":           self.status,
-                "interface":        self.current_interface,
-                "router_ip":        self.current_router_ip,
+                "status": self.status,
+                "interface": self.current_interface,
+                "router_ip": self.current_router_ip,
                 "operational_mode": self.operational_mode,
-                "limit_mbps":       self.limit_mbps,
-                "uptime":           round(uptime, 1),
-                "target_count":     len(self.targets),
-                "targets":          list(self.targets),
-                "whitelisted":      list(self.whitelisted),
-                "devices":          list(self.devices),
-                "telemetry":        telemetry,
-                "total_speed_kbps": round(total_speed_bps / 125, 1),
-                "total_speed_mbps": round(total_speed_bps / 125000, 3),
-                "total_data_mb":    round(total_bytes / (1024 * 1024), 2),
+                "limit_mbps": self.limit_mbps,
+                "uptime": uptime,
+                "target_count": len(self.targets),
+                "total_speed_kbps": round(total_speed_kbps, 1),
+                "total_speed_mbps": round(total_speed_kbps / 125.0, 2),
+                "total_data_mb": round(total_bytes / (1024 * 1024), 2),
+                "targets": list(self.targets),
+                "whitelisted": list(self.whitelisted),
+                "devices": list(self.devices),
+                "telemetry": telemetry_list
             }
