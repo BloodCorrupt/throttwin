@@ -67,18 +67,22 @@ Throttwin guides you through:
 ### Web UI Dashboard
 
 ```bat
-:: Option 1: Double-click or run the dedicated Web UI script
+:: Option 1: Standard Web UI (binds to 0.0.0.0, accessible on LAN)
 runweb.bat
 
-:: Option 2: Run via CLI flag
+:: Option 2: Localhost-Only Web UI (binds strictly to 127.0.0.1, LAN blocked)
+runweb_localhost.bat
+
+:: Option 3: Run via CLI flag
 run.bat --web
 ```
 
 Open http://localhost:5000 in your browser.
 
-Custom port:
+Custom port or host:
 ```bat
 runweb.bat --port 8080
+runweb_localhost.bat --port 8080
 ```
 
 
