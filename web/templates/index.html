@@ -90,20 +90,20 @@
                 </div>
             </header>
 
+            <!-- ═══ Global Multi-Interface Session Tab Bar (Persistent Across All Pages) ═══ -->
+            <div class="session-tabs-bar" id="sessionTabsBar">
+                <div class="session-tabs-list" id="sessionTabsList">
+                    <!-- Injected by JS: one tab per interface session -->
+                </div>
+                <button class="btn btn-secondary btn-sm add-session-btn" id="btnAddSession"
+                    title="Add another network interface">
+                    <i class="fa-solid fa-plus"></i>
+                    <span>Add Interface</span>
+                </button>
+            </div>
+
             <!-- TAB 1: DASHBOARD / LIVE MONITOR -->
             <section class="tab-pane active" id="pane-dashboard">
-
-                <!-- ═══ Multi-Interface Session Tab Bar ═══ -->
-                <div class="session-tabs-bar" id="sessionTabsBar">
-                    <div class="session-tabs-list" id="sessionTabsList">
-                        <!-- Injected by JS: one tab per interface session -->
-                    </div>
-                    <button class="btn btn-secondary btn-sm add-session-btn" id="btnAddSession"
-                        title="Add another network interface">
-                        <i class="fa-solid fa-plus"></i>
-                        <span>Add Interface</span>
-                    </button>
-                </div>
 
                 <!-- Metrics Grid -->
                 <div class="metrics-grid">
@@ -247,7 +247,7 @@
                     <div class="card-header">
                         <div class="card-title">
                             <i class="fa-solid fa-network-wired"></i>
-                            <h3>Discovered Network Devices</h3>
+                            <h3 id="scannerTitleText">Discovered Network Devices</h3>
                         </div>
                         <div class="card-actions">
                             <button class="btn btn-secondary" id="btnScanDevicesTab">
@@ -334,66 +334,104 @@
 
             <!-- TAB 4: CONFIGURATION -->
             <section class="tab-pane" id="pane-settings">
-                <div class="card" style="max-width: 800px; margin: 0 auto;">
-                    <div class="card-header">
-                        <div class="card-title">
-                            <i class="fa-solid fa-sliders"></i>
-                            <h3>Network & Engine Settings</h3>
-                        </div>
-                        <button class="btn btn-secondary btn-sm" id="btnAutoDetectSettings"
-                            title="Re-detect network interface and gateway">
-                            <i class="fa-solid fa-wand-magic-sparkles cyan"></i> Auto Detect
-                        </button>
-                    </div>
-                    <div class="card-body">
-                        <div class="form-group">
-                            <div
-                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
-                                <label class="form-label" for="settingInterface" style="margin-bottom: 0;">Network
-                                    Interface</label>
-                                <span class="badge badge-whitelist" id="badgeInterfaceStatus"
-                                    style="font-size: 0.72rem; padding: 2px 8px;"><i class="fa-solid fa-bolt"></i>
-                                    Auto-Detected</span>
+                <div class="settings-layout">
+                    <!-- Section 1: Multi-Interface Sessions Hub -->
+                    <div class="card settings-card">
+                        <div class="card-header">
+                            <div class="card-title">
+                                <i class="fa-solid fa-network-wired cyan"></i>
+                                <h3>Network Adapters & Sessions Manager</h3>
                             </div>
-                            <select id="settingInterface" class="input-dark select-dark"></select>
-                            <span class="form-help">Select the active Windows network adapter (changing auto-detects its
-                                router gateway).</span>
+                            <button class="btn btn-secondary btn-sm" id="btnAutoDetectSettings"
+                                title="Re-detect network adapters and router gateways">
+                                <i class="fa-solid fa-wand-magic-sparkles cyan"></i> Auto-Detect All
+                            </button>
                         </div>
+                        <div class="card-body">
+                            <p class="settings-desc">Manage per-interface gateway routing, hardware links, and individual default speed limits for all detected adapters.</p>
+                            <div class="devices-table-container">
+                                <table class="devices-table settings-iface-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Interface / Link</th>
+                                            <th>Local IP & Subnet</th>
+                                            <th>MAC Address</th>
+                                            <th style="min-width: 170px;">Gateway Router IP</th>
+                                            <th style="min-width: 110px;">Default Limit</th>
+                                            <th style="text-align: right;">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="settingsInterfacesBody">
+                                        <!-- Injected by JS -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
 
-                        <div class="form-group">
-                            <div
-                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
-                                <label class="form-label" for="settingRouterIp" style="margin-bottom: 0;">Router /
-                                    Gateway IP</label>
-                                <button type="button" class="btn btn-secondary btn-sm" id="btnAutoDetectGateway"
-                                    style="padding: 3px 10px; font-size: 0.75rem;"
-                                    title="Auto-detect gateway for selected interface">
-                                    <i class="fa-solid fa-arrows-rotate"></i> Detect Gateway
+                    <!-- Section 2: Global Engine & Radar Controls -->
+                    <div class="card settings-card" style="margin-top: 20px;">
+                        <div class="card-header">
+                            <div class="card-title">
+                                <i class="fa-solid fa-gears emerald"></i>
+                                <h3>Global Engine & Radar Parameters</h3>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="engine-settings-grid">
+                                <div class="engine-setting-card">
+                                    <div class="setting-label-row">
+                                        <label for="settingDiscoveryInterval"><i class="fa-solid fa-satellite-dish"></i> Background Discovery Frequency</label>
+                                        <span class="badge badge-whitelist">Automated</span>
+                                    </div>
+                                    <select id="settingDiscoveryInterval" class="input-dark select-dark">
+                                        <option value="5">Fast (Every 5s — High Sensitivity)</option>
+                                        <option value="8" selected>Normal (Every 8s — Recommended)</option>
+                                        <option value="15">Low Overhead (Every 15s)</option>
+                                        <option value="0">Disabled (Manual Scans Only)</option>
+                                    </select>
+                                    <span class="form-help">Interval for background ARP probes to trap new devices in Whitelist mode.</span>
+                                </div>
+
+                                <div class="engine-setting-card">
+                                    <div class="setting-label-row">
+                                        <label><i class="fa-solid fa-plug-circle-bolt"></i> Hot-Plug Detection</label>
+                                        <span class="badge badge-whitelist" id="badgeHotplugStatus"><i class="fa-solid fa-circle-check"></i> Active</span>
+                                    </div>
+                                    <p class="setting-static-text">Continuous 2.5s daemon monitoring USB Ethernet / Wi-Fi dongle insertions & link re-connections.</p>
+                                </div>
+
+                                <div class="engine-setting-card">
+                                    <div class="setting-label-row">
+                                        <label><i class="fa-solid fa-shield-virus"></i> Default Startup Mode</label>
+                                    </div>
+                                    <select id="settingDefaultMode" class="input-dark select-dark">
+                                        <option value="blacklist" selected>Blacklist (Throttle Selected Devices)</option>
+                                        <option value="whitelist">Whitelist (Throttle All Unknown Devices)</option>
+                                    </select>
+                                    <span class="form-help">Default operational mode selected when creating new interface sessions.</span>
+                                </div>
+
+                                <div class="engine-setting-card">
+                                    <div class="setting-label-row">
+                                        <label><i class="fa-solid fa-route"></i> Windows IP Kernel Routing</label>
+                                        <span class="badge badge-whitelist" id="badgeIpForwardingStatus"><i class="fa-solid fa-bolt"></i> Enabled</span>
+                                    </div>
+                                    <p class="setting-static-text">Windows kernel packet forwarding and Npcap driver bypass enabled for bidirectional shaping.</p>
+                                </div>
+                            </div>
+
+                            <div class="form-actions" style="display: flex; gap: 12px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border-color);">
+                                <button class="btn btn-primary" id="btnSaveSettings">
+                                    <i class="fa-solid fa-floppy-disk"></i> Save All Settings
+                                </button>
+                                <button class="btn btn-secondary" id="btnResetAutoSettings">
+                                    <i class="fa-solid fa-rotate-left"></i> Reset to Defaults
                                 </button>
                             </div>
-                            <input type="text" id="settingRouterIp" class="input-dark" placeholder="192.168.1.1">
-                            <span class="form-help">Default gateway IP dynamically resolved from Windows kernel routing
-                                table.</span>
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-label" for="settingDefaultLimit">Default Bandwidth Limit (Mbps)</label>
-                            <input type="number" id="settingDefaultLimit" class="input-dark" value="1.0" min="0.1"
-                                step="0.1">
-                            <span class="form-help">Default throttling speed assigned on startup.</span>
-                        </div>
-
-                        <div class="form-actions" style="display: flex; gap: 12px;">
-                            <button class="btn btn-primary" id="btnSaveSettings">
-                                <i class="fa-solid fa-floppy-disk"></i> Save Settings
-                            </button>
-                            <button class="btn btn-secondary" id="btnResetAutoSettings">
-                                <i class="fa-solid fa-rotate-left"></i> Reset to Defaults
-                            </button>
                         </div>
                     </div>
                 </div>
-
             </section>
         </main>
     </div>

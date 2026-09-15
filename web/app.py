@@ -366,13 +366,42 @@ def get_telemetry():
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     cfg = load_config() or {}
-    session = engine.get_session()
+    all_sessions = engine.get_all_sessions_state()
+    active_ifaces = engine.get_active_interfaces_full()
+    
+    # Merge saved session configs with active runtime state
+    saved_sessions = cfg.get("sessions", {})
+    interfaces_config = []
+    
+    for iface in active_ifaces:
+        name = iface["name"]
+        saved = saved_sessions.get(name, {})
+        sess_state = all_sessions.get(name, {})
+        
+        gw = sess_state.get("router_ip") or saved.get("router_ip") or iface.get("gateway") or "192.168.1.1"
+        lim = sess_state.get("limit_mbps") or saved.get("limit_mbps") or cfg.get("limit_mbps", 1.0)
+        
+        interfaces_config.append({
+            "name": name,
+            "ip": iface["ip"],
+            "mac": iface["mac"],
+            "metric": iface.get("metric", 9999),
+            "gateway": gw,
+            "default_limit": lim,
+            "link_status": sess_state.get("link_status", "ONLINE"),
+            "session_status": sess_state.get("status", "IDLE"),
+            "device_count": len(sess_state.get("devices", [])),
+        })
+
     return jsonify({
         "success": True,
-        "settings": {
-            "interface": cfg.get("interface") or (session.interface if session else None),
-            "router_ip": cfg.get("router_ip") or (session.router_ip if session else None),
+        "interfaces": interfaces_config,
+        "global": {
+            "discovery_interval": cfg.get("discovery_interval", 8),
+            "hotplug_detection": True,
+            "default_mode": cfg.get("operational_mode", "blacklist"),
             "default_limit": cfg.get("limit_mbps", 1.0),
+            "ip_forwarding_enabled": True
         }
     })
 
@@ -380,29 +409,59 @@ def get_settings():
 @app.route("/api/settings", methods=["POST"])
 def save_settings_api():
     data = request.get_json(silent=True) or {}
-    iface = data.get("interface")
-    router = data.get("router_ip")
-    limit = float(data.get("default_limit") or data.get("limit_mbps") or 1.0)
-    sid = _sid(data) or iface
+    
+    # 1. Multi-interface configurations payload
+    sessions_data = data.get("sessions") or {}
+    for iface_name, iface_cfg in sessions_data.items():
+        router = iface_cfg.get("router_ip")
+        lim = iface_cfg.get("limit_mbps") or iface_cfg.get("default_limit")
+        
+        session = engine.get_session(iface_name)
+        if session:
+            if router:
+                session.router_ip = router
+            if lim:
+                try:
+                    session.limit_mbps = float(lim)
+                except ValueError:
+                    pass
+        
+        # Save to config.json
+        save_config(
+            interface=iface_name,
+            router_ip=router or (session.router_ip if session else ""),
+            mode=session.operational_mode if session else "blacklist",
+            targets=session.targets if session else [],
+            limit_mbps=float(lim or 1.0),
+            whitelisted=session.whitelisted if session else []
+        )
 
-    session = engine.get_session(sid)
-    if session:
-        if iface:
-            session.interface = iface
-        if router:
-            session.router_ip = router
-        if limit:
-            session.limit_mbps = limit
+    # 2. Legacy single-session payload fallback
+    if not sessions_data:
+        iface = data.get("interface")
+        router = data.get("router_ip")
+        limit = float(data.get("default_limit") or data.get("limit_mbps") or 1.0)
+        sid = _sid(data) or iface
 
-    save_config(
-        interface=iface or (session.interface if session else ""),
-        router_ip=router or (session.router_ip if session else ""),
-        mode=session.operational_mode if session else "blacklist",
-        targets=session.targets if session else [],
-        limit_mbps=limit,
-        whitelisted=session.whitelisted if session else []
-    )
-    return jsonify({"success": True, "message": "Settings saved successfully."})
+        session = engine.get_session(sid)
+        if session:
+            if iface:
+                session.interface = iface
+            if router:
+                session.router_ip = router
+            if limit:
+                session.limit_mbps = limit
+
+        save_config(
+            interface=iface or (session.interface if session else ""),
+            router_ip=router or (session.router_ip if session else ""),
+            mode=session.operational_mode if session else "blacklist",
+            targets=session.targets if session else [],
+            limit_mbps=limit,
+            whitelisted=session.whitelisted if session else []
+        )
+
+    return jsonify({"success": True, "message": "All network settings saved successfully."})
 
 
 if __name__ == "__main__":

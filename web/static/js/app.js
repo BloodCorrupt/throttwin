@@ -397,33 +397,23 @@ class ThrottwinApp {
         const btnSaveSet = document.getElementById('btnSaveSettings');
         if (btnSaveSet) btnSaveSet.addEventListener('click', () => this.saveSettings());
 
-        const selectIface = document.getElementById('settingInterface');
-        if (selectIface) {
-            selectIface.addEventListener('change', async (e) => {
-                await this.autoDetectGateway(e.target.value);
-            });
-        }
-
         const btnAutoDetectSet = document.getElementById('btnAutoDetectSettings');
         if (btnAutoDetectSet) {
             btnAutoDetectSet.addEventListener('click', async () => {
-                await this.loadInterfaces(true);
-            });
-        }
-
-        const btnAutoDetectGw = document.getElementById('btnAutoDetectGateway');
-        if (btnAutoDetectGw) {
-            btnAutoDetectGw.addEventListener('click', async () => {
-                const curIface = document.getElementById('settingInterface')?.value;
-                await this.autoDetectGateway(curIface, true);
+                await this.loadInterfaces(false);
+                await this.renderSettings(true);
             });
         }
 
         const btnResetSet = document.getElementById('btnResetAutoSettings');
         if (btnResetSet) {
             btnResetSet.addEventListener('click', async () => {
-                await this.loadInterfaces(true);
-                document.getElementById('settingDefaultLimit').value = '1.0';
+                await this.loadInterfaces(false);
+                await this.renderSettings(false);
+                const disc = document.getElementById('settingDiscoveryInterval');
+                if (disc) disc.value = '8';
+                const mode = document.getElementById('settingDefaultMode');
+                if (mode) mode.value = 'blacklist';
                 this.showToast('Reset settings to auto-detected system defaults.', 'info');
             });
         }
@@ -518,6 +508,10 @@ class ThrottwinApp {
             this.renderScannerTable();
         } else if (tabId === 'rules') {
             this.renderRules();
+        } else if (tabId === 'settings') {
+            this.renderSettings();
+        } else if (tabId === 'dashboard') {
+            this.renderDashboardTable();
         }
     }
 
@@ -614,6 +608,8 @@ class ThrottwinApp {
         this.activeSessionId = sid;
         this.renderSessionTabs();
         this.updateActiveSessionUI();
+        this.renderScannerTable();
+        this.renderSettings();
 
         // Auto-scan if empty
         const sess = this.getActiveSession();
@@ -634,7 +630,7 @@ class ThrottwinApp {
 
         if (sess.status === "RUNNING") {
             if (pill) pill.className = 'session-status-pill running';
-            if (text) text.textContent = 'ACTIVE';
+            if (text) text.textContent = `${sess.session_id}: ACTIVE`;
             if (btn) {
                 btn.className = 'btn btn-danger btn-glow';
                 btn.disabled = false;
@@ -643,7 +639,7 @@ class ThrottwinApp {
             if (timer) timer.style.display = 'flex';
         } else {
             if (pill) pill.className = 'session-status-pill idle';
-            if (text) text.textContent = 'IDLE';
+            if (text) text.textContent = `${sess.session_id}: IDLE`;
             if (btn) {
                 btn.className = 'btn btn-primary btn-glow';
                 btn.disabled = false;
@@ -999,11 +995,22 @@ class ThrottwinApp {
 
     renderScannerTable() {
         const tbody = document.getElementById('scannerTableBody');
+        const statusBanner = document.getElementById('scannerStatusBanner');
+        const statusText = document.getElementById('scannerStatusText');
+        const titleText = document.getElementById('scannerTitleText');
         if (!tbody) return;
         const sess = this.getActiveSession();
+        const subnet = sess.router_ip ? sess.router_ip.split('.').slice(0, 3).join('.') + '.x' : (sess.interface || '—');
+
+        if (titleText) {
+            titleText.innerHTML = `Discovered Network Devices &mdash; <span style="color: var(--accent-cyan); font-family: var(--font-mono); font-weight: 600;">${sess.session_id}</span> <span style="font-size: 0.8rem; color: var(--text-muted); font-family: var(--font-mono);">(${subnet})</span>`;
+        }
+        if (statusText) {
+            statusText.textContent = `[${sess.session_id}] ${sess.devices.length} device(s) online on subnet ${subnet}.`;
+        }
 
         if (!sess.devices.length) {
-            tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><p>No devices discovered yet.</p></td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><p>No devices discovered yet for ${sess.session_id}. Click "Rescan Network" above.</p></td></tr>`;
             return;
         }
 
@@ -1353,25 +1360,141 @@ class ThrottwinApp {
         }
     }
 
+    async renderSettings(showToastFeedback = false) {
+        const tbody = document.getElementById('settingsInterfacesBody');
+        if (!tbody) return;
+
+        try {
+            const res = await fetch('/api/settings');
+            const data = await res.json();
+            if (data.success) {
+                const ifaces = data.interfaces || [];
+                tbody.innerHTML = '';
+
+                if (!ifaces.length) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="empty-state"><p>No active network interfaces detected.</p></td></tr>`;
+                    return;
+                }
+
+                ifaces.forEach(iface => {
+                    const tr = document.createElement('tr');
+                    const isOnline = iface.link_status !== 'DISCONNECTED';
+                    const linkBadge = isOnline
+                        ? `<span class="badge badge-whitelist" style="font-size: 0.72rem;"><i class="fa-solid fa-bolt"></i> ONLINE</span>`
+                        : `<span class="badge badge-blacklist" style="font-size: 0.72rem;"><i class="fa-solid fa-triangle-exclamation"></i> DISCONNECTED</span>`;
+
+                    const isActiveSession = iface.name === this.activeSessionId;
+
+                    tr.innerHTML = `
+                        <td>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <strong style="color: var(--text-primary); font-size: 0.9rem;">${iface.name}</strong>
+                                ${linkBadge}
+                                ${isActiveSession ? '<span class="badge badge-new" style="font-size: 0.65rem;">Active View</span>' : ''}
+                            </div>
+                        </td>
+                        <td>
+                            <span class="device-ip">${iface.ip}</span>
+                        </td>
+                        <td>
+                            <span class="device-mac">${iface.mac}</span>
+                        </td>
+                        <td>
+                            <div style="display: flex; gap: 6px; align-items: center;">
+                                <input type="text" class="settings-input-sm iface-gateway-input" data-iface="${iface.name}" value="${iface.gateway || ''}" placeholder="192.168.1.1">
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="app.detectGatewayForIface('${iface.name}')" title="Auto-detect router gateway" style="padding: 4px 8px; flex-shrink: 0;">
+                                    <i class="fa-solid fa-arrows-rotate"></i>
+                                </button>
+                            </div>
+                        </td>
+                        <td>
+                            <div style="display: flex; gap: 4px; align-items: center;">
+                                <input type="number" step="0.1" min="0.1" class="settings-input-sm iface-limit-input" data-iface="${iface.name}" value="${iface.default_limit || 1.0}">
+                                <span style="font-size: 0.75rem; color: var(--text-muted);">Mbps</span>
+                            </div>
+                        </td>
+                        <td style="text-align: right;">
+                            <button class="btn btn-secondary btn-sm" onclick="app.switchSession('${iface.name}'); app.switchTab('dashboard');" title="Switch to this interface">
+                                <i class="fa-solid fa-arrow-right-to-bracket"></i> Switch
+                            </button>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                // Global Settings
+                if (data.global) {
+                    const disc = document.getElementById('settingDiscoveryInterval');
+                    if (disc && data.global.discovery_interval !== undefined) {
+                        disc.value = String(data.global.discovery_interval);
+                    }
+                    const mode = document.getElementById('settingDefaultMode');
+                    if (mode && data.global.default_mode) {
+                        mode.value = data.global.default_mode;
+                    }
+                }
+
+                if (showToastFeedback) {
+                    this.showToast('Network interfaces and router gateways refreshed.', 'success');
+                }
+            }
+        } catch (e) {
+            console.error("Failed to render settings:", e);
+        }
+    }
+
+    async detectGatewayForIface(ifaceName) {
+        try {
+            const res = await fetch(`/api/interfaces?interface=${encodeURIComponent(ifaceName)}`);
+            const data = await res.json();
+            if (data.success && data.default_gateway) {
+                const input = document.querySelector(`.iface-gateway-input[data-iface="${ifaceName}"]`);
+                if (input) input.value = data.default_gateway;
+                this.showToast(`Gateway for ${ifaceName}: ${data.default_gateway}`, 'success');
+            } else {
+                this.showToast(`Could not auto-detect gateway for ${ifaceName}.`, 'error');
+            }
+        } catch (e) {
+            this.showToast('Failed to auto-detect gateway.', 'error');
+        }
+    }
+
     async saveSettings() {
-        const iface = document.getElementById('settingInterface').value;
-        const router = document.getElementById('settingRouterIp').value.trim();
-        const limit = parseFloat(document.getElementById('settingDefaultLimit').value) || 1.0;
+        const sessionsData = {};
+        document.querySelectorAll('.iface-gateway-input').forEach(inp => {
+            const iface = inp.dataset.iface;
+            const gw = inp.value.trim();
+            const limInput = document.querySelector(`.iface-limit-input[data-iface="${iface}"]`);
+            const lim = limInput ? (parseFloat(limInput.value) || 1.0) : 1.0;
+            sessionsData[iface] = {
+                router_ip: gw,
+                default_limit: lim
+            };
+        });
+
+        const discoveryInterval = parseInt(document.getElementById('settingDiscoveryInterval')?.value || '8');
+        const defaultMode = document.getElementById('settingDefaultMode')?.value || 'blacklist';
 
         try {
             const res = await fetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ interface: iface, router_ip: router, default_limit: limit })
+                body: JSON.stringify({
+                    sessions: sessionsData,
+                    discovery_interval: discoveryInterval,
+                    operational_mode: defaultMode
+                })
             });
             const data = await res.json();
             if (data.success) {
-                this.showToast('Settings saved successfully.', 'success');
+                this.showToast('All interface configurations and engine settings saved.', 'success');
+                await this.fetchStatus();
+                this.renderSessionTabs();
             } else {
                 this.showToast(data.error || 'Failed to save settings.', 'error');
             }
         } catch (e) {
-            this.showToast('Settings saved locally.', 'success');
+            this.showToast('Network error while saving settings.', 'error');
         }
     }
 
