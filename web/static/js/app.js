@@ -391,7 +391,7 @@ class ThrottwinApp {
         if (state.limit_mbps) this.state.limit_mbps = state.limit_mbps;
         if (state.operational_mode) this.state.mode = state.operational_mode;
 
-        // Update Session Status Pill
+        // Update Session Status Pill & Control Button
         const pill = document.getElementById('sessionStatusPill');
         const text = document.getElementById('sessionStatusText');
         const btn = document.getElementById('btnSessionControl');
@@ -403,28 +403,22 @@ class ThrottwinApp {
             if (text) text.textContent = 'ACTIVE';
             if (btn) {
                 btn.className = 'btn btn-danger btn-glow';
+                btn.disabled = false;
                 btn.innerHTML = '<i class="fa-solid fa-stop"></i> <span>Stop Session</span>';
             }
             if (timer) timer.style.display = 'flex';
-        } else if (state.status === "SCANNING") {
-            if (pill) pill.className = 'session-status-pill idle';
-            if (text) text.textContent = 'SCANNING';
-            if (btn) {
-                btn.className = 'btn btn-secondary';
-                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> <span>Scanning...</span>';
-            }
-            if (timer) timer.style.display = 'none';
-            if (btnApplyLive) btnApplyLive.style.display = 'none';
         } else {
             if (pill) pill.className = 'session-status-pill idle';
             if (text) text.textContent = 'IDLE';
             if (btn) {
                 btn.className = 'btn btn-primary btn-glow';
+                btn.disabled = false;
                 btn.innerHTML = '<i class="fa-solid fa-play"></i> <span>Start Session</span>';
             }
             if (timer) timer.style.display = 'none';
             if (btnApplyLive) btnApplyLive.style.display = 'none';
         }
+
 
         // Mode Pill Sync
         const btnBl = document.getElementById('btnModeBlacklist');
@@ -774,7 +768,7 @@ class ThrottwinApp {
             } finally {
                 if (btn) btn.disabled = false;
             }
-        } else if (this.state.status !== "STOPPING" && this.state.status !== "SCANNING") {
+        } else if (this.state.status !== "STOPPING") {
             // Selected devices array
             const selectedDevices = this.state.devices.filter(d => this.state.selectedIps.has(d.ip));
             const globalWlMacs = new Set(Object.keys(this.state.rules.whitelist || {}).map(m => m.toLowerCase()));

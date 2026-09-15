@@ -100,30 +100,21 @@ class ThrottwinEngine:
         if not iface or not router:
             return self.devices
 
+        fresh = arp_scan(iface, router)
         with self.lock:
-            was_running = self.status == "RUNNING"
-            if not was_running:
-                self.status = "SCANNING"
+            prev_count  = len(self.devices)
+            self.devices = merge_devices(self.devices, fresh)
+            self.current_interface = iface
+            self.current_router_ip = router
+            devices_snap = list(self.devices)
 
-        try:
-            fresh = arp_scan(iface, router)
-            with self.lock:
-                prev_count  = len(self.devices)
-                self.devices = merge_devices(self.devices, fresh)
-                self.current_interface = iface
-                self.current_router_ip = router
-                devices_snap = list(self.devices)
+        if len(devices_snap) > prev_count:
+            self.broadcast_event("devices_updated", {
+                "devices":   devices_snap,
+                "new_count": len(devices_snap) - prev_count
+            })
+        return devices_snap
 
-            if len(devices_snap) > prev_count:
-                self.broadcast_event("devices_updated", {
-                    "devices":   devices_snap,
-                    "new_count": len(devices_snap) - prev_count
-                })
-            return devices_snap
-        finally:
-            with self.lock:
-                if not was_running:
-                    self.status = "IDLE"
 
     def _bg_discovery_worker(self):
         # Initial fast scan after 1s startup
