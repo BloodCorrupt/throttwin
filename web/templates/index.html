@@ -314,18 +314,29 @@
                             <i class="fa-solid fa-sliders"></i>
                             <h3>Network & Engine Settings</h3>
                         </div>
+                        <button class="btn btn-secondary btn-sm" id="btnAutoDetectSettings" title="Re-detect network interface and gateway">
+                            <i class="fa-solid fa-wand-magic-sparkles cyan"></i> Auto Detect
+                        </button>
                     </div>
                     <div class="card-body">
                         <div class="form-group">
-                            <label class="form-label" for="settingInterface">Network Interface</label>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+                                <label class="form-label" for="settingInterface" style="margin-bottom: 0;">Network Interface</label>
+                                <span class="badge badge-whitelist" id="badgeInterfaceStatus" style="font-size: 0.72rem; padding: 2px 8px;"><i class="fa-solid fa-bolt"></i> Auto-Detected</span>
+                            </div>
                             <select id="settingInterface" class="input-dark select-dark"></select>
-                            <span class="form-help">Select the active Windows network adapter (Wi-Fi, Ethernet).</span>
+                            <span class="form-help">Select the active Windows network adapter (changing auto-detects its router gateway).</span>
                         </div>
 
                         <div class="form-group">
-                            <label class="form-label" for="settingRouterIp">Router / Gateway IP</label>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+                                <label class="form-label" for="settingRouterIp" style="margin-bottom: 0;">Router / Gateway IP</label>
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnAutoDetectGateway" style="padding: 3px 10px; font-size: 0.75rem;" title="Auto-detect gateway for selected interface">
+                                    <i class="fa-solid fa-arrows-rotate"></i> Detect Gateway
+                                </button>
+                            </div>
                             <input type="text" id="settingRouterIp" class="input-dark" placeholder="192.168.1.1">
-                            <span class="form-help">Default gateway IP used as the ARP spoof target proxy.</span>
+                            <span class="form-help">Default gateway IP dynamically resolved from Windows kernel routing table.</span>
                         </div>
 
                         <div class="form-group">
@@ -334,13 +345,17 @@
                             <span class="form-help">Default throttling speed assigned on startup.</span>
                         </div>
 
-                        <div class="form-actions">
+                        <div class="form-actions" style="display: flex; gap: 12px;">
                             <button class="btn btn-primary" id="btnSaveSettings">
                                 <i class="fa-solid fa-floppy-disk"></i> Save Settings
+                            </button>
+                            <button class="btn btn-secondary" id="btnResetAutoSettings">
+                                <i class="fa-solid fa-rotate-left"></i> Reset to Defaults
                             </button>
                         </div>
                     </div>
                 </div>
+
             </section>
         </main>
     </div>

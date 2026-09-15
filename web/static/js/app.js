@@ -225,9 +225,43 @@ class ThrottwinApp {
         const btnSubRule = document.getElementById('btnSubmitRule');
         if (btnSubRule) btnSubRule.addEventListener('click', () => this.submitRule());
 
-        // Save Settings
+        // Save Settings & Auto Detect
         const btnSaveSet = document.getElementById('btnSaveSettings');
         if (btnSaveSet) btnSaveSet.addEventListener('click', () => this.saveSettings());
+
+        const selectIface = document.getElementById('settingInterface');
+        if (selectIface) {
+            selectIface.addEventListener('change', async (e) => {
+                const chosenIface = e.target.value;
+                this.state.interface = chosenIface;
+                await this.autoDetectGateway(chosenIface);
+            });
+        }
+
+        const btnAutoDetectSet = document.getElementById('btnAutoDetectSettings');
+        if (btnAutoDetectSet) {
+            btnAutoDetectSet.addEventListener('click', async () => {
+                await this.loadInterfaces(true);
+            });
+        }
+
+        const btnAutoDetectGw = document.getElementById('btnAutoDetectGateway');
+        if (btnAutoDetectGw) {
+            btnAutoDetectGw.addEventListener('click', async () => {
+                const curIface = document.getElementById('settingInterface')?.value || this.state.interface;
+                await this.autoDetectGateway(curIface, true);
+            });
+        }
+
+        const btnResetSet = document.getElementById('btnResetAutoSettings');
+        if (btnResetSet) {
+            btnResetSet.addEventListener('click', async () => {
+                await this.loadInterfaces(true);
+                document.getElementById('settingDefaultLimit').value = '1.0';
+                this.state.limit_mbps = 1.0;
+                this.showToast('Reset settings to auto-detected system defaults.', 'info');
+            });
+        }
 
         // Select All Checkbox
         const selectAllCb = document.getElementById('selectAllCheckbox');
@@ -246,6 +280,7 @@ class ThrottwinApp {
             });
         }
     }
+
 
     handleLimitSelection(newLimit) {
         this.state.limit_mbps = newLimit;
@@ -329,7 +364,7 @@ class ThrottwinApp {
         }
     }
 
-    async loadInterfaces() {
+    async loadInterfaces(showToastFeedback = false) {
         try {
             const res = await fetch('/api/interfaces');
             const data = await res.json();
@@ -350,11 +385,36 @@ class ThrottwinApp {
                 this.state.router_ip = data.default_gateway || '192.168.1.1';
                 const routerInp = document.getElementById('settingRouterIp');
                 if (routerInp) routerInp.value = this.state.router_ip;
+
+                if (showToastFeedback) {
+                    this.showToast(`Auto-detected interface: ${data.default_interface} (Gateway: ${this.state.router_ip})`, 'success');
+                }
             }
         } catch (e) {
             console.error("Failed to load interfaces:", e);
         }
     }
+
+    async autoDetectGateway(iface, showToastFeedback = false) {
+        try {
+            const url = iface ? `/api/interfaces?interface=${encodeURIComponent(iface)}` : '/api/interfaces';
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.success && data.default_gateway) {
+                this.state.router_ip = data.default_gateway;
+                const routerInp = document.getElementById('settingRouterIp');
+                if (routerInp) routerInp.value = data.default_gateway;
+                if (showToastFeedback) {
+                    this.showToast(`Auto-detected Gateway: ${data.default_gateway} on ${iface || data.default_interface}`, 'success');
+                }
+            }
+        } catch (e) {
+            if (showToastFeedback) {
+                this.showToast('Failed to auto-detect gateway.', 'error');
+            }
+        }
+    }
+
 
     async loadRules() {
         try {

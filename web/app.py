@@ -64,12 +64,21 @@ def get_status():
 
 @app.route("/api/interfaces")
 def get_interfaces_list():
+    iface_param = request.args.get("interface")
+    if iface_param:
+        gw = engine.get_default_gateway(iface_param)
+        return jsonify({
+            "success":           True,
+            "interface":        iface_param,
+            "default_gateway":   gw or "192.168.1.1",
+        })
     return jsonify({
         "success":           True,
         "interfaces":        engine.get_interfaces(),
         "default_interface": engine.current_interface,
         "default_gateway":   engine.get_default_gateway(),
     })
+
 
 
 # ─── Scanning ──────────────────────────────────────────────────────────────────
