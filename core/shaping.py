@@ -150,9 +150,12 @@ class TrafficShaper:
         from scapy.all import sniff
         from .network import get_scapy_interface
 
-        # Capture packets associated with this target strictly
+        # Capture packets associated with this target:
+        # 1. Upstream: all packets sent from target MAC (both IPv4 and IPv6)
+        # 2. Downstream IPv4: all packets returning from router to target IPv4
+        # 3. Downstream IPv6: all intercepted IPv6 packets from router to our MAC
         if self.target_mac and self.target_mac not in ("unknown", "Unknown", "-", ""):
-            bpf = f"(ether src {self.target_mac}) or (dst host {self.target_ip})"
+            bpf = f"(ether src {self.target_mac}) or (dst host {self.target_ip}) or (ether src {self.router_mac} and ip6 and ether dst {self.my_mac})"
         else:
             bpf = f"src host {self.target_ip} or dst host {self.target_ip}"
 
@@ -233,11 +236,12 @@ class TrafficShaper:
                 if IPv6 in pkt and pkt_src_mac == self.target_mac:
                     self.observed_ipv6_addrs.add(pkt[IPv6].src.lower())
 
-                # Classify stream direction strictly:
+                # Classify stream direction:
                 is_upstream = (pkt_src_mac == self.target_mac) or (IP in pkt and pkt[IP].src == self.target_ip)
                 is_downstream = (
                     (IP in pkt and pkt[IP].dst == self.target_ip)
                     or (IPv6 in pkt and (pkt[IPv6].dst.lower() in self.observed_ipv6_addrs or (self.target_ipv6_ll and pkt[IPv6].dst.lower() == self.target_ipv6_ll)))
+                    or (pkt_src_mac == self.router_mac and pkt_dst_mac == self.my_mac)
                 )
 
                 if not is_upstream and not is_downstream:
@@ -273,7 +277,7 @@ class TrafficShaper:
                         sendp(fwd, iface=npf_iface, verbose=0)
                 except Exception as e:
                     log.debug(f"Forward error (interface reconnecting?): {e}")
-                    npf_iface = get_scapy_interface(interface)
+                    npf_iface = get_scapy_interface(self.interface)
 
         except Exception as e:
             log.debug(f"Forwarder error for {self.target_ip}: {e}")
@@ -281,18 +285,47 @@ class TrafficShaper:
 
 def enable_ip_forwarding():
     """
-    Preserve host network stack stability and avoid disruptive netsh resets.
-    Packet interception and forwarding is performed entirely in userspace by
-    TrafficShaper._forwarder via Scapy sendp(), preserving rate limiting.
-    We deliberately avoid calling disruptive 'netsh int ... set global forwarding'
-    which resets active TCP sockets on Windows and breaks DNS.
+    Enable dual-stack IPv4 and IPv6 forwarding on Windows in-memory via netsh.
+    Required so that intercepted (ARP/NDP-spoofed) packets are accepted by
+    the kernel network stack.  Rate limiting is enforced by the Scapy
+    userspace forwarder's token bucket — excess packets are dropped before
+    re-injection.
+
+    Self-trapping on Ethernet is prevented by promisc=False on the sniffer
+    plus strict MAC/IP guards in _on_packet and the ARP self-healing watchdog.
     """
-    log.info("Host TCP/IP stack preserved in client mode (userspace Scapy forwarding active).")
+    try:
+        import subprocess
+        # Enable IPv4 routing via netsh (in-memory, no registry writes)
+        subprocess.run(
+            "netsh int ipv4 set global forwarding=enabled",
+            shell=True, capture_output=True
+        )
+        # Enable IPv6 routing via netsh (in-memory, no registry writes)
+        subprocess.run(
+            "netsh int ipv6 set global forwarding=enabled",
+            shell=True, capture_output=True
+        )
+        log.info("Dual-stack IPv4/IPv6 forwarding enabled in-memory.")
+    except Exception as e:
+        log.warning(f"Could not enable IP forwarding: {e}")
 
 
 def disable_ip_forwarding():
-    """Clean up after session ends."""
-    pass
+    """Ensure kernel IP forwarding is off after session ends."""
+    try:
+        import subprocess
+        subprocess.run(
+            "netsh int ipv4 set global forwarding=disabled",
+            shell=True, capture_output=True
+        )
+        subprocess.run(
+            "netsh int ipv6 set global forwarding=disabled",
+            shell=True, capture_output=True
+        )
+        log.info("IP forwarding disabled.")
+    except Exception as e:
+        log.warning(f"Could not disable IP forwarding: {e}")
 
 
 def setup_traffic_shaping(interface, targets, limit_mbps, router_ip,

