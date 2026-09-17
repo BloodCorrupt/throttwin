@@ -265,6 +265,9 @@ def _lan_wakeup_probe(ips):
             pass
 
     try:
+        from .logger import log_packet
+        log_packet("PROBE", "UDP", "0.0.0.0", "255.255.255.255", length=1,
+                   details=f"LAN Wi-Fi wake burst ({len(ips)} targets, 8 ports: 137, 5353, 5355, 1900, 53, 80, 443, 8080)")
         workers = min(len(ips), 128)
         with ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(_poke, ips))
@@ -471,6 +474,14 @@ def arp_scan(interface, router_ip, aggressive=True, progress_callback=None):
             devices.append(host_dev)
 
     devices.sort(key=device_sort_key)
+
+    from .logger import log_packet
+    for d in devices:
+        dev_ip = d.get("ip")
+        dev_mac = d.get("mac")
+        dev_name = d.get("hostname") or d.get("vendor") or "Unknown"
+        log_packet("DISCOVER", "ARP", dev_mac, dev_ip, length=42, details=f"Device found: {dev_name}", session_id=interface)
+
     return devices
 
 

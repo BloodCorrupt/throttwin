@@ -10,6 +10,15 @@ from core.config import (
     load_config, save_config, RULES_FILE
 )
 from core.core_tools import get_core_status, download_arp_scan, is_arp_scan_installed
+from core.logger import (
+    get_debug_logs, get_packet_logs, clear_debug_logs, clear_packet_logs,
+    clear_all_logs, set_log_level, get_log_level_name, set_packet_capture,
+    is_packet_capture_enabled, set_logging_enabled, is_logging_enabled,
+    set_cpu_saver_mode, get_log_status, install_log_handler
+)
+
+# Initialize logger handler early
+install_log_handler()
 
 log = logging.getLogger("throttwin.web")
 
@@ -47,7 +56,7 @@ def sse_stream():
     def event_generator():
         q = engine.subscribe_events()
         try:
-            # Send initial state for all sessions + core tools status
+            # Send initial state for all sessions + core tools + logs status
             all_states = engine.get_all_sessions_state()
             session_ids = list(all_states.keys())
             initial = json.dumps({
@@ -55,7 +64,10 @@ def sse_stream():
                 "sessions": all_states,
                 "session_ids": session_ids,
                 "active_session_id": session_ids[0] if session_ids else None,
-                "core": get_core_status()
+                "core": get_core_status(),
+                "log_status": get_log_status(),
+                "recent_debug_logs": get_debug_logs(limit=60),
+                "recent_packet_logs": get_packet_logs(limit=60),
             })
             yield f"data: {initial}\n\n"
             while True:
@@ -551,6 +563,123 @@ def save_settings_api():
         )
 
     return jsonify({"success": True, "message": "All network settings saved successfully."})
+
+
+# ─── Logs & Packet Telemetry API ──────────────────────────────────────────────
+
+@app.route("/api/logs")
+def get_logs_endpoint():
+    """Fetch recent debug or packet logs with filtering."""
+    log_type = request.args.get("type", "debug").lower()
+    limit = int(request.args.get("limit", 100))
+    since_id = int(request.args.get("since_id", 0))
+    
+    if log_type == "packet":
+        action = request.args.get("action")
+        proto = request.args.get("proto")
+        filter_term = request.args.get("filter") or request.args.get("search")
+        packets = get_packet_logs(limit=limit, filter_term=filter_term, action=action, proto=proto, since_id=since_id)
+        return jsonify({
+            "success": True,
+            "type": "packet",
+            "packets": packets,
+            "status": get_log_status()
+        })
+    elif log_type == "all":
+        debugs = get_debug_logs(limit=limit, since_id=since_id)
+        packets = get_packet_logs(limit=limit, since_id=since_id)
+        return jsonify({
+            "success": True,
+            "type": "all",
+            "logs": debugs,
+            "packets": packets,
+            "status": get_log_status()
+        })
+    else:
+        level = request.args.get("level", "ALL")
+        search = request.args.get("search")
+        logs = get_debug_logs(limit=limit, level=level, search=search, since_id=since_id)
+        return jsonify({
+            "success": True,
+            "type": "debug",
+            "logs": logs,
+            "status": get_log_status()
+        })
+
+
+@app.route("/api/logs/clear", methods=["POST"])
+def clear_logs_endpoint():
+    """Clear in-memory debug logs, packet logs, or both."""
+    data = request.get_json(silent=True) or {}
+    log_type = data.get("type", "all").lower()
+    
+    if log_type == "debug":
+        clear_debug_logs()
+        msg = "Debug logs cleared."
+    elif log_type == "packet":
+        clear_packet_logs()
+        msg = "Packet activity stream cleared."
+    else:
+        clear_all_logs()
+        msg = "All logs and packet streams cleared."
+        
+    return jsonify({
+        "success": True,
+        "message": msg,
+        "status": get_log_status()
+    })
+
+
+@app.route("/api/logs/level", methods=["POST"])
+def set_log_level_endpoint():
+    """Dynamically set runtime logging level."""
+    data = request.get_json(silent=True) or {}
+    level = data.get("level", "INFO")
+    active_level = set_log_level(level)
+    return jsonify({
+        "success": True,
+        "level": active_level,
+        "status": get_log_status()
+    })
+
+
+@app.route("/api/logs/system_logging", methods=["POST"])
+def set_system_logging_endpoint():
+    """Enable or disable Python system logging capture (CPU saver)."""
+    data = request.get_json(silent=True) or {}
+    enabled = data.get("enabled", True)
+    active = set_logging_enabled(enabled)
+    return jsonify({
+        "success": True,
+        "logging_enabled": active,
+        "status": get_log_status()
+    })
+
+
+@app.route("/api/logs/packet_capture", methods=["POST"])
+def set_packet_capture_endpoint():
+    """Toggle real-time packet telemetry capture on/off."""
+    data = request.get_json(silent=True) or {}
+    enabled = data.get("enabled", True)
+    active = set_packet_capture(enabled)
+    return jsonify({
+        "success": True,
+        "packet_capture_enabled": active,
+        "status": get_log_status()
+    })
+
+
+@app.route("/api/logs/cpu_saver", methods=["POST"])
+def set_cpu_saver_endpoint():
+    """Toggle CPU Saver Mode (disables/enables both system and packet logging)."""
+    data = request.get_json(silent=True) or {}
+    enabled = data.get("enabled", True)
+    active = set_cpu_saver_mode(enabled)
+    return jsonify({
+        "success": True,
+        "cpu_saver_mode": active,
+        "status": get_log_status()
+    })
 
 
 if __name__ == "__main__":

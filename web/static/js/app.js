@@ -21,6 +21,24 @@ class ThrottwinApp {
         this.timerInterval = null;
         this.isScanning = false;
 
+        // Mini Console & Packet Stream State
+        this.debugLogs = [];
+        this.packetLogs = [];
+        this.consoleActiveTab = 'debug';
+        this.consoleAutoScroll = true;
+        this.consolePaused = false;
+        this.consoleFilterLevel = 'ALL';
+        this.consoleSearchDebug = '';
+        this.consoleFilterAction = 'ALL';
+        this.consoleSearchPacket = '';
+        this.systemLoggingEnabled = true;
+        this.packetCaptureEnabled = true;
+        this.cpuSaverMode = false;
+        this.recentPacketTimestamps = [];
+        this.isDraggingConsole = false;
+        this.dragOffset = { x: 0, y: 0 };
+        this.unreadErrorsCount = 0;
+
         this.init();
     }
 
@@ -70,6 +88,7 @@ class ThrottwinApp {
 
     async init() {
         this.bindEvents();
+        this.initConsole();
         await this.loadInterfaces();
         await this.loadRules();
         await this.fetchStatus();
@@ -124,6 +143,18 @@ class ThrottwinApp {
                     this.coreStatus = payload.core;
                     this.updateCoreUI();
                 }
+                if (payload.log_status) {
+                    this.updateLogStatusUI(payload.log_status);
+                }
+                if (payload.recent_debug_logs && payload.recent_debug_logs.length) {
+                    this.debugLogs = payload.recent_debug_logs;
+                    this.renderDebugLogs();
+                }
+                if (payload.recent_packet_logs && payload.recent_packet_logs.length) {
+                    this.packetLogs = payload.recent_packet_logs;
+                    this.renderPacketLogs();
+                }
+                this.updateConsoleBadges();
                 if (payload.sessions) {
                     this.sessionIds = payload.session_ids || Object.keys(payload.sessions);
                     for (const [id, state] of Object.entries(payload.sessions)) {
@@ -340,6 +371,34 @@ class ThrottwinApp {
                         this.renderScannerTable();
                     }
                 }
+                break;
+
+            case "log_event":
+                this.onLogEvent(data);
+                break;
+
+            case "packet_event":
+                this.onPacketEvent(data);
+                break;
+
+            case "logs_cleared":
+                this.onLogsCleared(data.type);
+                break;
+
+            case "log_level_changed":
+                if (data.level) this.updateLogLevelUI(data.level);
+                break;
+
+            case "packet_capture_toggled":
+                if (data.enabled !== undefined) this.updatePacketCaptureUI(data.enabled);
+                break;
+
+            case "system_logging_toggled":
+                if (data.enabled !== undefined) this.updateSystemLoggingUI(data.enabled);
+                break;
+
+            case "cpu_saver_toggled":
+                this.updateCpuSaverUI(data.cpu_saver_mode, data);
                 break;
         }
     }
@@ -2160,6 +2219,880 @@ class ThrottwinApp {
             toast.style.transform = 'translateX(100%)';
             setTimeout(() => toast.remove(), 300);
         }, 4000);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // MINI DEBUG & PACKET CONSOLE WINDOW IMPLEMENTATION
+    // ═════════════════════════════════════════════════════════════════════════
+
+    initConsole() {
+        // 1. Toggle window triggers
+        const btnTop = document.getElementById('btnToggleMiniConsole');
+        if (btnTop) btnTop.addEventListener('click', () => this.toggleMiniConsole());
+
+        const floatTrigger = document.getElementById('floatingConsoleTrigger');
+        if (floatTrigger) floatTrigger.addEventListener('click', () => this.toggleMiniConsole());
+
+        // 2. Tab switching
+        const tabDebug = document.getElementById('tabBtnDebugLogs');
+        const tabPacket = document.getElementById('tabBtnPacketLogs');
+        if (tabDebug) tabDebug.addEventListener('click', () => this.switchConsoleTab('debug'));
+        if (tabPacket) tabPacket.addEventListener('click', () => this.switchConsoleTab('packet'));
+
+        // 3. Window action controls
+        const btnCpuSaver = document.getElementById('btnConsoleCpuSaver');
+        if (btnCpuSaver) btnCpuSaver.addEventListener('click', () => this.toggleCpuSaverMode());
+
+        const btnAutoScroll = document.getElementById('btnConsoleAutoScroll');
+        if (btnAutoScroll) btnAutoScroll.addEventListener('click', () => this.toggleConsoleAutoScroll());
+
+        const btnPause = document.getElementById('btnConsolePause');
+        if (btnPause) btnPause.addEventListener('click', () => this.toggleConsolePause());
+
+        const btnClear = document.getElementById('btnConsoleClear');
+        if (btnClear) btnClear.addEventListener('click', () => this.clearConsoleLogs());
+
+        const btnExport = document.getElementById('btnConsoleExport');
+        if (btnExport) btnExport.addEventListener('click', () => this.exportConsoleLogs());
+
+        const btnMax = document.getElementById('btnConsoleMaximize');
+        if (btnMax) btnMax.addEventListener('click', () => this.toggleConsoleMaximize());
+
+        const btnMin = document.getElementById('btnConsoleMinimize');
+        if (btnMin) btnMin.addEventListener('click', () => this.toggleConsoleMinimize());
+
+        const btnClose = document.getElementById('btnConsoleClose');
+        if (btnClose) btnClose.addEventListener('click', () => this.hideMiniConsole());
+
+        // 4. Debug Logs Filters & Search
+        const selectLevel = document.getElementById('selectLogLevel');
+        if (selectLevel) {
+            selectLevel.addEventListener('change', (e) => {
+                this.consoleFilterLevel = e.target.value;
+                this.renderDebugLogs();
+            });
+        }
+
+        const inputSearchDebug = document.getElementById('inputFilterDebug');
+        const btnClearDebugSearch = document.getElementById('btnClearDebugSearch');
+        if (inputSearchDebug) {
+            inputSearchDebug.addEventListener('input', (e) => {
+                this.consoleSearchDebug = e.target.value.trim().toLowerCase();
+                if (btnClearDebugSearch) {
+                    btnClearDebugSearch.style.display = this.consoleSearchDebug ? 'block' : 'none';
+                }
+                this.renderDebugLogs();
+            });
+        }
+        if (btnClearDebugSearch) {
+            btnClearDebugSearch.addEventListener('click', () => {
+                if (inputSearchDebug) inputSearchDebug.value = '';
+                this.consoleSearchDebug = '';
+                btnClearDebugSearch.style.display = 'none';
+                this.renderDebugLogs();
+            });
+        }
+
+        const toggleLogging = document.getElementById('toggleSystemLogging');
+        if (toggleLogging) {
+            toggleLogging.addEventListener('change', (e) => {
+                this.setSystemLogging(e.target.checked);
+            });
+        }
+
+        const btnResumeDebug = document.getElementById('btnResumeDebugLogging');
+        if (btnResumeDebug) {
+            btnResumeDebug.addEventListener('click', () => {
+                this.setSystemLogging(true);
+            });
+        }
+
+        // 5. Packet Filter Chips & Search
+        const filterChips = document.getElementById('packetFilterChips');
+        if (filterChips) {
+            filterChips.addEventListener('click', (e) => {
+                const chip = e.target.closest('.chip');
+                if (!chip) return;
+                filterChips.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+                chip.classList.add('active');
+                this.consoleFilterAction = chip.dataset.filter || 'ALL';
+                this.renderPacketLogs();
+            });
+        }
+
+        const inputSearchPacket = document.getElementById('inputFilterPacket');
+        const btnClearPacketSearch = document.getElementById('btnClearPacketSearch');
+        if (inputSearchPacket) {
+            inputSearchPacket.addEventListener('input', (e) => {
+                this.consoleSearchPacket = e.target.value.trim().toLowerCase();
+                if (btnClearPacketSearch) {
+                    btnClearPacketSearch.style.display = this.consoleSearchPacket ? 'block' : 'none';
+                }
+                this.renderPacketLogs();
+            });
+        }
+        if (btnClearPacketSearch) {
+            btnClearPacketSearch.addEventListener('click', () => {
+                if (inputSearchPacket) inputSearchPacket.value = '';
+                this.consoleSearchPacket = '';
+                btnClearPacketSearch.style.display = 'none';
+                this.renderPacketLogs();
+            });
+        }
+
+        // 6. Packet Capture Toggle
+        const toggleCapture = document.getElementById('togglePacketCapture');
+        if (toggleCapture) {
+            toggleCapture.addEventListener('change', (e) => {
+                this.setPacketCapture(e.target.checked);
+            });
+        }
+
+        const btnResumePacket = document.getElementById('btnResumePacketLogging');
+        if (btnResumePacket) {
+            btnResumePacket.addEventListener('click', () => {
+                this.setPacketCapture(true);
+            });
+        }
+
+        // 7. Settings Tab CPU Saver & Logging Controls
+        const btnCpuSettings = document.getElementById('btnToggleCpuSaverSettings');
+        if (btnCpuSettings) {
+            btnCpuSettings.addEventListener('click', () => {
+                this.toggleCpuSaverMode();
+            });
+        }
+
+        const selectSysLogSettings = document.getElementById('settingSystemLogging');
+        if (selectSysLogSettings) {
+            selectSysLogSettings.addEventListener('change', (e) => {
+                this.setSystemLogging(e.target.value === '1');
+            });
+        }
+
+        const selectPktCapSettings = document.getElementById('settingPacketCapture');
+        if (selectPktCapSettings) {
+            selectPktCapSettings.addEventListener('change', (e) => {
+                this.setPacketCapture(e.target.value === '1');
+            });
+        }
+
+        // 8. Dynamic Log Level Selector from Toolbar
+        const levelLabel = document.getElementById('labelCurrentLogLevel');
+        if (levelLabel) {
+            levelLabel.style.cursor = 'pointer';
+            levelLabel.addEventListener('click', async () => {
+                const levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR'];
+                const currentIdx = levels.indexOf(this.consoleFilterLevel === 'ALL' ? 'INFO' : this.consoleFilterLevel);
+                const nextLevel = levels[(currentIdx + 1) % levels.length];
+                try {
+                    const res = await fetch('/api/logs/level', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ level: nextLevel })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        this.updateLogLevelUI(data.level);
+                        this.showToast(`Server log level set to ${data.level}`, 'success');
+                    }
+                } catch (e) {}
+            });
+        }
+
+        // 9. Initialize Draggable Window & Scroll Detection & PPS meter
+        this._initConsoleDrag();
+        this._initConsoleScrollDetection();
+        this._startPpsMeter();
+    }
+
+    toggleMiniConsole(tab) {
+        const win = document.getElementById('miniConsoleWindow');
+        if (!win) return;
+        if (win.classList.contains('hidden')) {
+            this.showMiniConsole(tab);
+        } else {
+            this.hideMiniConsole();
+        }
+    }
+
+    showMiniConsole(tab) {
+        const win = document.getElementById('miniConsoleWindow');
+        if (!win) return;
+        win.classList.remove('hidden');
+        if (win.classList.contains('minimized')) {
+            win.classList.remove('minimized');
+        }
+        if (tab) {
+            this.switchConsoleTab(tab);
+        }
+        this.unreadErrorsCount = 0;
+        this.updateConsoleBadges();
+        this.scrollConsoleToBottom();
+    }
+
+    hideMiniConsole() {
+        const win = document.getElementById('miniConsoleWindow');
+        if (win) win.classList.add('hidden');
+    }
+
+    switchConsoleTab(tab) {
+        this.consoleActiveTab = tab;
+        const tabDebug = document.getElementById('tabBtnDebugLogs');
+        const tabPacket = document.getElementById('tabBtnPacketLogs');
+        const paneDebug = document.getElementById('paneDebugLogs');
+        const panePacket = document.getElementById('panePacketLogs');
+
+        if (tab === 'packet') {
+            if (tabDebug) tabDebug.classList.remove('active');
+            if (tabPacket) tabPacket.classList.add('active');
+            if (paneDebug) paneDebug.classList.remove('active');
+            if (panePacket) panePacket.classList.add('active');
+            this.renderPacketLogs();
+        } else {
+            if (tabDebug) tabDebug.classList.add('active');
+            if (tabPacket) tabPacket.classList.remove('active');
+            if (paneDebug) paneDebug.classList.add('active');
+            if (panePacket) panePacket.classList.remove('active');
+            this.renderDebugLogs();
+        }
+        this.scrollConsoleToBottom();
+    }
+
+    // ─── Realtime Event Handlers ──────────────────────────────────────────
+
+    onLogEvent(entry) {
+        if (!entry) return;
+        this.debugLogs.push(entry);
+        if (this.debugLogs.length > 1000) {
+            this.debugLogs.shift();
+        }
+
+        const isErr = entry.level === 'ERROR' || entry.level === 'CRITICAL';
+        if (isErr) {
+            this.unreadErrorsCount += 1;
+        }
+
+        this.updateConsoleBadges();
+
+        if (this.consolePaused) return;
+
+        // If currently in debug tab and matches filters, append to DOM directly
+        if (this.consoleActiveTab === 'debug' && this._matchesDebugFilter(entry)) {
+            const container = document.getElementById('terminalDebugContent');
+            if (container) {
+                const empty = container.querySelector('.log-empty-state');
+                if (empty) empty.remove();
+
+                const el = document.createElement('div');
+                el.innerHTML = this._createLogEntryHtml(entry);
+                container.appendChild(el.firstElementChild);
+
+                // Cap DOM children
+                while (container.children.length > 500) {
+                    container.removeChild(container.firstChild);
+                }
+
+                if (this.consoleAutoScroll) {
+                    this.scrollConsoleToBottom();
+                }
+            }
+        }
+    }
+
+    onPacketEvent(entry) {
+        if (!entry) return;
+        this.packetLogs.push(entry);
+        if (this.packetLogs.length > 1000) {
+            this.packetLogs.shift();
+        }
+
+        this.recentPacketTimestamps.push(Date.now());
+        this.updateConsoleBadges();
+
+        if (this.consolePaused) return;
+
+        // If currently in packet tab and matches filters, append to DOM directly
+        if (this.consoleActiveTab === 'packet' && this._matchesPacketFilter(entry)) {
+            const list = document.getElementById('packetStreamList');
+            if (list) {
+                const empty = list.querySelector('.log-empty-state');
+                if (empty) empty.remove();
+
+                const el = document.createElement('div');
+                el.innerHTML = this._createPacketRowHtml(entry);
+                list.appendChild(el.firstElementChild);
+
+                // Cap DOM children
+                while (list.children.length > 500) {
+                    list.removeChild(list.firstChild);
+                }
+
+                if (this.consoleAutoScroll) {
+                    this.scrollConsoleToBottom();
+                }
+            }
+        }
+    }
+
+    onLogsCleared(type) {
+        if (type === 'debug' || type === 'all') {
+            this.debugLogs = [];
+            this.renderDebugLogs();
+        }
+        if (type === 'packet' || type === 'all') {
+            this.packetLogs = [];
+            this.renderPacketLogs();
+        }
+        this.unreadErrorsCount = 0;
+        this.updateConsoleBadges();
+        this.showToast('Logs buffer cleared', 'info');
+    }
+
+    // ─── Rendering ────────────────────────────────────────────────────────
+
+    _matchesDebugFilter(entry) {
+        if (this.consoleFilterLevel !== 'ALL' && entry.level !== this.consoleFilterLevel) {
+            return false;
+        }
+        if (this.consoleSearchDebug) {
+            const txt = (entry.message || '') + ' ' + (entry.name || '') + ' ' + (entry.module || '') + ' ' + (entry.funcName || '');
+            if (!txt.toLowerCase().includes(this.consoleSearchDebug)) return false;
+        }
+        return true;
+    }
+
+    _matchesPacketFilter(entry) {
+        if (this.consoleFilterAction !== 'ALL') {
+            const act = entry.action || '';
+            const proto = entry.proto || '';
+            if (this.consoleFilterAction === 'ARP' || this.consoleFilterAction === 'IPv4' || this.consoleFilterAction === 'IPv6') {
+                if (proto !== this.consoleFilterAction) return false;
+            } else if (!act.includes(this.consoleFilterAction)) {
+                return false;
+            }
+        }
+        if (this.consoleSearchPacket) {
+            const txt = (entry.src || '') + ' ' + (entry.dst || '') + ' ' + (entry.details || '') + ' ' + (entry.action || '');
+            if (!txt.toLowerCase().includes(this.consoleSearchPacket)) return false;
+        }
+        return true;
+    }
+
+    _createLogEntryHtml(entry) {
+        const isErr = entry.level === 'ERROR' || entry.level === 'CRITICAL';
+        const isWarn = entry.level === 'WARNING' || entry.level === 'WARN';
+        const rowClass = isErr ? 'is-error' : (isWarn ? 'is-warn' : '');
+        const time = entry.time_str || new Date(entry.timestamp * 1000).toLocaleTimeString();
+        const level = entry.level || 'INFO';
+        const module = entry.module ? `[${entry.module}]` : '';
+        const msg = this._escapeHtml(entry.message || entry.formatted || '');
+
+        return `
+            <div class="log-entry-row ${rowClass}" data-id="${entry.id}">
+                <span class="log-entry-time">${time}</span>
+                <span class="log-entry-level ${level}">${level}</span>
+                <span class="log-entry-module">${module}</span>
+                <span class="log-entry-msg">${msg}</span>
+            </div>
+        `;
+    }
+
+    _createPacketRowHtml(entry) {
+        const time = entry.time_str || new Date(entry.timestamp * 1000).toLocaleTimeString();
+        const action = entry.action || 'PKT';
+        const proto = entry.proto || 'ETH';
+        const src = this._escapeHtml(entry.src || '-');
+        const dst = this._escapeHtml(entry.dst || '-');
+        const length = entry.length ? (entry.length > 1024 ? `${(entry.length/1024).toFixed(1)} KB` : `${entry.length} B`) : '-';
+        const details = this._escapeHtml(entry.details || '');
+        const actClass = action.toLowerCase().replace('_', '-');
+
+        return `
+            <div class="packet-row action-${actClass}" data-id="${entry.id}">
+                <span class="pkt-time">${time}</span>
+                <span class="pkt-action ${action}">${action}</span>
+                <span class="pkt-proto">${proto}</span>
+                <span class="pkt-flow" title="${src} → ${dst}">${src} <span class="flow-arrow">→</span> ${dst}</span>
+                <span class="pkt-size">${length}</span>
+                <span class="pkt-details" title="${details}">${details}</span>
+            </div>
+        `;
+    }
+
+    renderDebugLogs() {
+        const container = document.getElementById('terminalDebugContent');
+        if (!container) return;
+
+        const filtered = this.debugLogs.filter(e => this._matchesDebugFilter(e));
+        if (!filtered.length) {
+            container.innerHTML = `<div class="log-empty-state">No matching system logs. (Level: ${this.consoleFilterLevel})</div>`;
+            return;
+        }
+
+        container.innerHTML = filtered.map(e => this._createLogEntryHtml(e)).join('');
+        if (this.consoleAutoScroll) {
+            this.scrollConsoleToBottom();
+        }
+    }
+
+    renderPacketLogs() {
+        const list = document.getElementById('packetStreamList');
+        if (!list) return;
+
+        const filtered = this.packetLogs.filter(e => this._matchesPacketFilter(e));
+        if (!filtered.length) {
+            list.innerHTML = `<div class="log-empty-state">No matching packet events. (Filter: ${this.consoleFilterAction})</div>`;
+            return;
+        }
+
+        list.innerHTML = filtered.map(e => this._createPacketRowHtml(e)).join('');
+        if (this.consoleAutoScroll) {
+            this.scrollConsoleToBottom();
+        }
+    }
+
+    updateConsoleBadges() {
+        const badgeTop = document.getElementById('consoleBadge');
+        if (badgeTop) {
+            const total = this.debugLogs.length + this.packetLogs.length;
+            badgeTop.textContent = total > 999 ? '999+' : total;
+            if (this.unreadErrorsCount > 0) {
+                badgeTop.classList.add('has-errors');
+            } else {
+                badgeTop.classList.remove('has-errors');
+            }
+        }
+
+        const bDebug = document.getElementById('badgeDebugCount');
+        if (bDebug) bDebug.textContent = this.debugLogs.length;
+
+        const bPacket = document.getElementById('badgePacketCount');
+        if (bPacket) bPacket.textContent = this.packetLogs.length;
+
+        const footerText = document.getElementById('footerLogStatusText');
+        if (footerText) {
+            footerText.textContent = `Buffer: ${this.debugLogs.length}/1000 logs | ${this.packetLogs.length}/1000 pkts`;
+        }
+    }
+
+    async setSystemLogging(enabled) {
+        try {
+            const res = await fetch('/api/logs/system_logging', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: Boolean(enabled) })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.updateSystemLoggingUI(data.logging_enabled);
+                this.showToast(`System logging ${data.logging_enabled ? 'enabled (Full diagnostics)' : 'disabled (0% CPU overhead) ⚡'}`, 'info');
+            }
+        } catch (e) {
+            this.showToast('Could not toggle system logging', 'error');
+        }
+    }
+
+    async setPacketCapture(enabled) {
+        try {
+            const res = await fetch('/api/logs/packet_capture', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: Boolean(enabled) })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.updatePacketCaptureUI(data.packet_capture_enabled);
+                this.showToast(`Packet telemetry ${data.packet_capture_enabled ? 'resumed 🛰️' : 'paused (CPU saver) ⚡'}`, 'info');
+            }
+        } catch (e) {
+            this.showToast('Could not toggle packet capture', 'error');
+        }
+    }
+
+    async toggleCpuSaverMode() {
+        const target = !this.cpuSaverMode;
+        try {
+            const res = await fetch('/api/logs/cpu_saver', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: target })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.updateCpuSaverUI(data.cpu_saver_mode, data.status);
+                if (data.cpu_saver_mode) {
+                    this.showToast('🍃 CPU Saver Mode ACTIVE: Logging & packet telemetry disabled for 0% CPU overhead!', 'success');
+                } else {
+                    this.showToast('⚡ CPU Saver Mode DISABLED: Real-time logging & telemetry restored.', 'info');
+                }
+            }
+        } catch (e) {
+            this.showToast('Could not toggle CPU saver mode', 'error');
+        }
+    }
+
+    updateSystemLoggingUI(enabled) {
+        this.systemLoggingEnabled = Boolean(enabled);
+        const toggle = document.getElementById('toggleSystemLogging');
+        if (toggle) toggle.checked = this.systemLoggingEnabled;
+
+        const label = document.getElementById('labelSystemLoggingSwitch');
+        if (label) label.textContent = this.systemLoggingEnabled ? 'Logging' : 'Logging (Off)';
+
+        const banner = document.getElementById('bannerCpuSaverDebug');
+        if (banner) banner.style.display = this.systemLoggingEnabled ? 'none' : 'flex';
+
+        const settingSelect = document.getElementById('settingSystemLogging');
+        if (settingSelect) settingSelect.value = this.systemLoggingEnabled ? '1' : '0';
+
+        const badge = document.getElementById('badgeSystemLoggingStatus');
+        if (badge) {
+            badge.textContent = this.systemLoggingEnabled ? 'Enabled' : 'Disabled (0% Overhead)';
+            badge.className = `badge ${this.systemLoggingEnabled ? 'badge-whitelist' : 'badge-blacklist'}`;
+        }
+
+        this._syncCpuSaverState();
+    }
+
+    updatePacketCaptureUI(enabled) {
+        this.packetCaptureEnabled = Boolean(enabled);
+        const toggle = document.getElementById('togglePacketCapture');
+        if (toggle) toggle.checked = this.packetCaptureEnabled;
+
+        const label = document.getElementById('labelPacketCaptureSwitch');
+        if (label) label.textContent = this.packetCaptureEnabled ? 'Capture' : 'Capture (Off)';
+
+        const banner = document.getElementById('bannerCpuSaverPacket');
+        if (banner) banner.style.display = this.packetCaptureEnabled ? 'none' : 'flex';
+
+        const settingSelect = document.getElementById('settingPacketCapture');
+        if (settingSelect) settingSelect.value = this.packetCaptureEnabled ? '1' : '0';
+
+        const badge = document.getElementById('badgePacketCaptureStatus');
+        if (badge) {
+            badge.textContent = this.packetCaptureEnabled ? 'Enabled' : 'Disabled (0% Overhead)';
+            badge.className = `badge ${this.packetCaptureEnabled ? 'badge-whitelist' : 'badge-blacklist'}`;
+        }
+
+        this._syncCpuSaverState();
+    }
+
+    _syncCpuSaverState() {
+        const isSaver = (!this.systemLoggingEnabled) && (!this.packetCaptureEnabled);
+        this.cpuSaverMode = isSaver;
+
+        const btnWin = document.getElementById('btnConsoleCpuSaver');
+        if (btnWin) {
+            if (isSaver) {
+                btnWin.classList.add('active');
+                btnWin.title = "CPU Saver Mode ACTIVE (Logging & Telemetry Disabled) — Click to resume";
+            } else {
+                btnWin.classList.remove('active');
+                btnWin.title = "Toggle CPU Saver Mode (Disable logging to save CPU horsepower)";
+            }
+        }
+
+        const btnSettings = document.getElementById('btnToggleCpuSaverSettings');
+        const labelSettings = document.getElementById('labelCpuSaverSettingsBtn');
+        if (btnSettings) {
+            if (isSaver) {
+                btnSettings.classList.add('btn-primary');
+                btnSettings.classList.remove('btn-secondary');
+            } else {
+                btnSettings.classList.remove('btn-primary');
+                btnSettings.classList.add('btn-secondary');
+            }
+        }
+        if (labelSettings) {
+            labelSettings.textContent = isSaver ? 'Disable CPU Saver' : 'Enable CPU Saver';
+        }
+    }
+
+    updateCpuSaverUI(isSaver, status) {
+        this.cpuSaverMode = Boolean(isSaver);
+        if (isSaver) {
+            this.updateSystemLoggingUI(false);
+            this.updatePacketCaptureUI(false);
+        } else {
+            if (status && status.logging_enabled !== undefined) {
+                this.updateSystemLoggingUI(status.logging_enabled);
+            } else {
+                this.updateSystemLoggingUI(true);
+            }
+            if (status && status.packet_capture_enabled !== undefined) {
+                this.updatePacketCaptureUI(status.packet_capture_enabled);
+            } else {
+                this.updatePacketCaptureUI(true);
+            }
+        }
+        this._syncCpuSaverState();
+    }
+
+    updateLogStatusUI(status) {
+        if (!status) return;
+        if (status.log_level) {
+            this.updateLogLevelUI(status.log_level);
+        }
+        if (status.logging_enabled !== undefined) {
+            this.updateSystemLoggingUI(status.logging_enabled);
+        }
+        if (status.packet_capture_enabled !== undefined) {
+            this.updatePacketCaptureUI(status.packet_capture_enabled);
+        }
+        if (status.cpu_saver_mode !== undefined) {
+            this._syncCpuSaverState();
+        }
+    }
+
+    updateLogLevelUI(level) {
+        const label = document.getElementById('labelCurrentLogLevel');
+        if (label) {
+            label.innerHTML = `<span class="level-indicator-dot"></span><span>Level: ${level}</span>`;
+        }
+        const select = document.getElementById('selectLogLevel');
+        if (select && select.value !== level && select.value === 'ALL') {
+            // Keep user selection if on ALL, otherwise sync
+        }
+    }
+
+    // ─── Actions & Controls ───────────────────────────────────────────────
+
+    async clearConsoleLogs() {
+        const targetType = this.consoleActiveTab === 'debug' ? 'debug' : 'packet';
+        try {
+            await fetch('/api/logs/clear', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type: targetType })
+            });
+            this.onLogsCleared(targetType);
+        } catch (e) {
+            this.showToast('Could not clear logs', 'error');
+        }
+    }
+
+    exportConsoleLogs() {
+        const isDebug = this.consoleActiveTab === 'debug';
+        const data = isDebug ? this.debugLogs : this.packetLogs;
+        if (!data || !data.length) {
+            this.showToast('No logs to export', 'info');
+            return;
+        }
+
+        const textLines = isDebug
+            ? data.map(e => `[${e.time_str || ''}] [${e.level || 'INFO'}] ${e.name || ''}: ${e.message || ''}`).join('\n')
+            : data.map(e => `[${e.time_str || ''}] [${e.action || ''}] ${e.proto || ''} ${e.src || ''} -> ${e.dst || ''} (${e.length || 0}B) ${e.details || ''}`).join('\n');
+
+        navigator.clipboard.writeText(textLines).then(() => {
+            this.showToast(`📋 Copied ${data.length} ${isDebug ? 'system logs' : 'packet events'} to clipboard!`, 'success');
+        }).catch(() => {
+            // Fallback download
+            const blob = new Blob([textLines], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `throttwin-${isDebug ? 'system-logs' : 'packet-stream'}-${Date.now()}.txt`;
+            a.click();
+            URL.revokeObjectURL(url);
+            this.showToast('Downloaded logs export file', 'success');
+        });
+    }
+
+    toggleConsoleAutoScroll() {
+        this.consoleAutoScroll = !this.consoleAutoScroll;
+        const btn = document.getElementById('btnConsoleAutoScroll');
+        const footerStatus = document.getElementById('footerAutoScrollStatus');
+        if (btn) {
+            if (this.consoleAutoScroll) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        }
+        if (footerStatus) {
+            footerStatus.innerHTML = this.consoleAutoScroll
+                ? `<i class="fa-solid fa-lock"></i> Auto-Scroll: ON`
+                : `<i class="fa-solid fa-lock-open" style="color:var(--text-muted);"></i> Auto-Scroll: OFF`;
+        }
+        if (this.consoleAutoScroll) {
+            this.scrollConsoleToBottom();
+        }
+    }
+
+    toggleConsolePause() {
+        this.consolePaused = !this.consolePaused;
+        const btn = document.getElementById('btnConsolePause');
+        const footerStream = document.getElementById('footerStreamStatus');
+        const liveDot = document.getElementById('consoleLiveDot');
+
+        if (btn) {
+            if (this.consolePaused) {
+                btn.innerHTML = `<i class="fa-solid fa-play"></i>`;
+                btn.title = "Resume Live Stream";
+                btn.classList.add('active');
+            } else {
+                btn.innerHTML = `<i class="fa-solid fa-pause"></i>`;
+                btn.title = "Pause Live Stream";
+                btn.classList.remove('active');
+            }
+        }
+
+        if (footerStream) {
+            footerStream.innerHTML = this.consolePaused
+                ? `<i class="fa-solid fa-pause" style="color:var(--accent-amber);"></i> Stream Paused`
+                : `<i class="fa-solid fa-circle-dot green"></i> Streaming Live`;
+        }
+
+        if (liveDot) {
+            liveDot.style.background = this.consolePaused ? '#f59e0b' : '#00f5a0';
+            liveDot.style.boxShadow = this.consolePaused ? '0 0 6px #f59e0b' : '0 0 6px #00f5a0';
+        }
+
+        if (!this.consolePaused) {
+            if (this.consoleActiveTab === 'debug') this.renderDebugLogs();
+            else this.renderPacketLogs();
+        }
+    }
+
+    toggleConsoleMaximize() {
+        const win = document.getElementById('miniConsoleWindow');
+        const icon = document.getElementById('iconConsoleMaximize');
+        if (!win) return;
+
+        win.classList.toggle('maximized');
+        if (win.classList.contains('maximized')) {
+            if (icon) icon.className = 'fa-solid fa-down-left-and-up-right-to-center';
+        } else {
+            if (icon) icon.className = 'fa-regular fa-window-maximize';
+        }
+    }
+
+    toggleConsoleMinimize() {
+        const win = document.getElementById('miniConsoleWindow');
+        if (!win) return;
+        win.classList.toggle('minimized');
+    }
+
+    scrollConsoleToBottom() {
+        if (!this.consoleAutoScroll) return;
+        requestAnimationFrame(() => {
+            const container = document.getElementById('terminalDebugContainer');
+            if (container && this.consoleActiveTab === 'debug') {
+                container.scrollTop = container.scrollHeight;
+            }
+            const list = document.getElementById('packetStreamList');
+            if (list && this.consoleActiveTab === 'packet') {
+                list.scrollTop = list.scrollHeight;
+            }
+        });
+    }
+
+    _initConsoleDrag() {
+        const header = document.getElementById('miniConsoleHeader');
+        const win = document.getElementById('miniConsoleWindow');
+        if (!header || !win) return;
+
+        let startX = 0, startY = 0, initialLeft = 0, initialTop = 0;
+
+        const onMouseDown = (e) => {
+            if (e.target.closest('button') || e.target.closest('select') || e.target.closest('input')) {
+                return;
+            }
+            if (win.classList.contains('maximized')) return;
+
+            this.isDraggingConsole = true;
+            const rect = win.getBoundingClientRect();
+            startX = e.clientX;
+            startY = e.clientY;
+            initialLeft = rect.left;
+            initialTop = rect.top;
+
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+            e.preventDefault();
+        };
+
+        const onMouseMove = (e) => {
+            if (!this.isDraggingConsole) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+
+            win.style.left = `${Math.max(10, Math.min(window.innerWidth - win.offsetWidth - 10, initialLeft + dx))}px`;
+            win.style.top = `${Math.max(10, Math.min(window.innerHeight - 60, initialTop + dy))}px`;
+            win.style.bottom = 'auto';
+            win.style.right = 'auto';
+        };
+
+        const onMouseUp = () => {
+            this.isDraggingConsole = false;
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        };
+
+        header.addEventListener('mousedown', onMouseDown);
+    }
+
+    _initConsoleScrollDetection() {
+        const debugContainer = document.getElementById('terminalDebugContainer');
+        const packetList = document.getElementById('packetStreamList');
+
+        const onScroll = (el) => {
+            if (!el) return;
+            const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+            if (!isNearBottom && this.consoleAutoScroll) {
+                // User scrolled up manually
+                this.consoleAutoScroll = false;
+                const btn = document.getElementById('btnConsoleAutoScroll');
+                if (btn) btn.classList.remove('active');
+                const footerStatus = document.getElementById('footerAutoScrollStatus');
+                if (footerStatus) {
+                    footerStatus.innerHTML = `<i class="fa-solid fa-lock-open" style="color:var(--text-muted);"></i> Auto-Scroll: OFF`;
+                }
+            } else if (isNearBottom && !this.consoleAutoScroll) {
+                // User scrolled back to bottom
+                this.consoleAutoScroll = true;
+                const btn = document.getElementById('btnConsoleAutoScroll');
+                if (btn) btn.classList.add('active');
+                const footerStatus = document.getElementById('footerAutoScrollStatus');
+                if (footerStatus) {
+                    footerStatus.innerHTML = `<i class="fa-solid fa-lock"></i> Auto-Scroll: ON`;
+                }
+            }
+        };
+
+        if (debugContainer) debugContainer.addEventListener('scroll', () => onScroll(debugContainer));
+        if (packetList) packetList.addEventListener('scroll', () => onScroll(packetList));
+    }
+
+    _startPpsMeter() {
+        setInterval(() => {
+            const now = Date.now();
+            const oneSecAgo = now - 1000;
+            this.recentPacketTimestamps = this.recentPacketTimestamps.filter(t => t >= oneSecAgo);
+            const pps = this.recentPacketTimestamps.length;
+            const badge = document.getElementById('badgePpsRate');
+            if (badge) {
+                badge.textContent = `${pps} pps`;
+                if (pps > 0) {
+                    badge.style.background = 'rgba(0, 245, 160, 0.25)';
+                    badge.style.borderColor = '#00f5a0';
+                } else {
+                    badge.style.background = 'rgba(255, 255, 255, 0.05)';
+                    badge.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+                }
+            }
+        }, 1000);
+    }
+
+    _escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
     }
 
     startLocalTimer() {

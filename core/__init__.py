@@ -28,6 +28,13 @@ from .core_tools import (
     get_core_status, download_arp_scan, is_arp_scan_installed,
     run_arp_scan_native, get_arp_scan_path
 )
+from .logger import (
+    install_log_handler, log_packet, get_debug_logs, get_packet_logs,
+    clear_debug_logs, clear_packet_logs, clear_all_logs,
+    set_log_level, get_log_level_name, set_packet_capture,
+    is_packet_capture_enabled, set_logging_enabled, is_logging_enabled,
+    set_cpu_saver_mode, get_log_status, register_broadcast_callback
+)
 
 __all__ = [
     # console
@@ -62,4 +69,9 @@ __all__ = [
     # core tools
     "get_core_status", "download_arp_scan", "is_arp_scan_installed",
     "run_arp_scan_native", "get_arp_scan_path",
+    # logger
+    "install_log_handler", "log_packet", "get_debug_logs", "get_packet_logs",
+    "clear_debug_logs", "clear_packet_logs", "clear_all_logs",
+    "set_log_level", "get_log_level_name", "set_packet_capture",
+    "is_packet_capture_enabled", "get_log_status", "register_broadcast_callback",
 ]

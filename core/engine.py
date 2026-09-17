@@ -29,6 +29,7 @@ from .config import (
     get_predefined_whitelist, get_predefined_blacklist,
     load_predefined_rules, save_predefined_rules
 )
+from .logger import install_log_handler, register_broadcast_callback, log_packet
 
 log = logging.getLogger("throttwin")
 
@@ -744,6 +745,10 @@ class ThrottwinEngine:
         self.lock = threading.Lock()
         self.sessions = {}        # {session_id: InterfaceSession}
         self.event_queues = []
+
+        # Hook log broadcaster to SSE engine
+        register_broadcast_callback(self.broadcast_event)
+        install_log_handler()
 
         # Auto-detect all active interfaces and create sessions
         self._auto_detect_sessions()

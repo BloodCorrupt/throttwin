@@ -113,6 +113,11 @@
                         <i class="fa-solid fa-plus"></i>
                         <span>Add Device</span>
                     </button>
+                    <button class="btn btn-secondary btn-sm" id="btnToggleMiniConsole" title="Toggle Live Debug & Packet Logs Console">
+                        <i class="fa-solid fa-terminal cyan"></i>
+                        <span>Logs</span>
+                        <span class="console-counter-badge" id="consoleBadge">0</span>
+                    </button>
                     <button class="btn btn-primary btn-glow" id="btnSessionControl">
                         <i class="fa-solid fa-play"></i>
                         <span id="btnSessionControlText">Start Session</span>
@@ -493,6 +498,48 @@
                                     <p class="setting-static-text">Windows kernel packet forwarding and Npcap driver bypass enabled for bidirectional shaping.</p>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+
+                    <!-- Section 4: Telemetry & CPU Horsepower Optimization -->
+                    <div class="card settings-card" style="margin-top: 20px;">
+                        <div class="card-header">
+                            <div class="card-title">
+                                <i class="fa-solid fa-gauge-high cyan"></i>
+                                <h3>Telemetry & CPU Horsepower Optimization</h3>
+                            </div>
+                            <div class="card-actions">
+                                <button class="btn btn-secondary btn-sm" id="btnToggleCpuSaverSettings">
+                                    <i class="fa-solid fa-leaf green"></i> <span id="labelCpuSaverSettingsBtn">Enable CPU Saver</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="engine-settings-grid">
+                                <div class="engine-setting-card">
+                                    <div class="setting-label-row">
+                                        <label for="settingSystemLogging"><i class="fa-solid fa-code"></i> Python System Logging</label>
+                                        <span class="badge" id="badgeSystemLoggingStatus">Enabled</span>
+                                    </div>
+                                    <select id="settingSystemLogging" class="input-dark select-dark">
+                                        <option value="1" selected>Enabled (Full Diagnostics & Debug Logs)</option>
+                                        <option value="0">Disabled (0% Overhead — Saves CPU Horsepower)</option>
+                                    </select>
+                                    <span class="form-help">When disabled, Python logging handlers exit immediately with zero CPU overhead.</span>
+                                </div>
+
+                                <div class="engine-setting-card">
+                                    <div class="setting-label-row">
+                                        <label for="settingPacketCapture"><i class="fa-solid fa-satellite-dish"></i> Packet Telemetry & Inspection</label>
+                                        <span class="badge" id="badgePacketCaptureStatus">Enabled</span>
+                                    </div>
+                                    <select id="settingPacketCapture" class="input-dark select-dark">
+                                        <option value="1" selected>Enabled (Live Packet Stream & PPS Meter)</option>
+                                        <option value="0">Disabled (Bypasses packet logging for maximum throughput)</option>
+                                    </select>
+                                    <span class="form-help">Disable during heavy network transfers to allocate maximum CPU horsepower to packet routing.</span>
+                                </div>
+                            </div>
 
                             <div class="form-actions" style="display: flex; gap: 12px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border-color);">
                                 <button class="btn btn-primary" id="btnSaveSettings">
@@ -588,6 +635,170 @@
                 <button class="btn btn-primary" id="btnSubmitAddSession">
                     <i class="fa-solid fa-plus"></i> Create Session
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ Floating Console Quick-Dock Trigger (Bottom Right) ═══ -->
+    <div class="floating-console-trigger" id="floatingConsoleTrigger" title="Open Debug & Packet Live Console">
+        <i class="fa-solid fa-terminal"></i>
+        <span class="trigger-label">Console</span>
+        <span class="pulse-beacon" id="consolePulseBeacon"></span>
+    </div>
+
+    <!-- ═══ Mini Debug & Packet Console Window (Floating, Draggable, Resizable) ═══ -->
+    <div class="mini-console-window hidden" id="miniConsoleWindow">
+        <!-- Window Header / Drag Handle -->
+        <div class="mini-console-header" id="miniConsoleHeader">
+            <div class="mini-console-title-group">
+                <i class="fa-solid fa-terminal terminal-icon cyan"></i>
+                <span class="mini-console-title">CONSOLE & PACKETS</span>
+                <span class="live-stream-dot" id="consoleLiveDot" title="Live stream active"></span>
+            </div>
+            
+            <div class="mini-console-tabs">
+                <button class="console-tab-btn active" data-tab="debug" id="tabBtnDebugLogs">
+                    <i class="fa-solid fa-code"></i>
+                    <span>System Logs</span>
+                    <span class="tab-badge" id="badgeDebugCount">0</span>
+                </button>
+                <button class="console-tab-btn" data-tab="packet" id="tabBtnPacketLogs">
+                    <i class="fa-solid fa-satellite-dish"></i>
+                    <span>Packet Stream</span>
+                    <span class="tab-badge" id="badgePacketCount">0</span>
+                    <span class="pps-badge" id="badgePpsRate">0 pps</span>
+                </button>
+            </div>
+
+            <div class="mini-console-window-controls">
+                <button class="btn-win-ctrl btn-cpu-saver" id="btnConsoleCpuSaver" title="Toggle CPU Saver Mode (Disable logging to save CPU horsepower)">
+                    <i class="fa-solid fa-leaf" id="iconConsoleCpuSaver"></i>
+                </button>
+                <button class="btn-win-ctrl active" id="btnConsoleAutoScroll" title="Toggle Auto-Scroll (Locked)">
+                    <i class="fa-solid fa-arrow-down-long"></i>
+                </button>
+                <button class="btn-win-ctrl" id="btnConsolePause" title="Pause / Resume Live Stream">
+                    <i class="fa-solid fa-pause"></i>
+                </button>
+                <button class="btn-win-ctrl" id="btnConsoleClear" title="Clear Visible Logs">
+                    <i class="fa-solid fa-trash-can"></i>
+                </button>
+                <button class="btn-win-ctrl" id="btnConsoleExport" title="Copy or Export Logs">
+                    <i class="fa-solid fa-copy"></i>
+                </button>
+                <button class="btn-win-ctrl" id="btnConsoleMaximize" title="Maximize / Restore">
+                    <i class="fa-regular fa-window-maximize" id="iconConsoleMaximize"></i>
+                </button>
+                <button class="btn-win-ctrl" id="btnConsoleMinimize" title="Minimize to Dock">
+                    <i class="fa-solid fa-minus"></i>
+                </button>
+                <button class="btn-win-ctrl close-btn" id="btnConsoleClose" title="Close Window">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Window Body -->
+        <div class="mini-console-body">
+            <!-- Tab 1: Debug Logs View -->
+            <div class="console-tab-pane active" id="paneDebugLogs">
+                <div class="console-toolbar">
+                    <div class="filter-group">
+                        <span class="filter-label">Level:</span>
+                        <select class="console-select" id="selectLogLevel">
+                            <option value="ALL">ALL LEVELS</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO" selected>INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                    </div>
+                    <div class="search-box">
+                        <i class="fa-solid fa-magnifying-glass search-icon"></i>
+                        <input type="text" id="inputFilterDebug" placeholder="Filter logs (text, module, func)..." class="console-search-input">
+                        <button class="search-clear-btn" id="btnClearDebugSearch" style="display:none;">&times;</button>
+                    </div>
+                    <div class="capture-toggle-group">
+                        <label class="switch-label" title="Toggle Python System Logging (Save CPU horsepower when disabled)">
+                            <input type="checkbox" id="toggleSystemLogging" checked>
+                            <span class="switch-slider"></span>
+                            <span class="switch-text" id="labelSystemLoggingSwitch">Logging</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="cpu-saver-banner" id="bannerCpuSaverDebug" style="display:none;">
+                    <i class="fa-solid fa-leaf green"></i>
+                    <div class="banner-text">
+                        <strong>CPU Saver Active:</strong> System logging is disabled to conserve CPU horsepower.
+                    </div>
+                    <button class="btn btn-xs btn-outline" id="btnResumeDebugLogging">Resume</button>
+                </div>
+                <div class="terminal-container" id="terminalDebugContainer">
+                    <div class="terminal-content" id="terminalDebugContent">
+                        <div class="log-empty-state">No system logs yet. Waiting for events...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 2: Packet Stream View -->
+            <div class="console-tab-pane" id="panePacketLogs">
+                <div class="console-toolbar">
+                    <div class="packet-filter-chips" id="packetFilterChips">
+                        <button class="chip active" data-filter="ALL">ALL</button>
+                        <button class="chip" data-filter="SPOOF">SPOOF</button>
+                        <button class="chip" data-filter="FWD">FORWARD</button>
+                        <button class="chip" data-filter="DROP">DROP</button>
+                        <button class="chip" data-filter="PROBE">PROBE</button>
+                        <button class="chip" data-filter="DISCOVER">DISCOVER</button>
+                        <button class="chip" data-filter="ARP">ARP</button>
+                        <button class="chip" data-filter="IPv4">IPv4</button>
+                        <button class="chip" data-filter="IPv6">IPv6</button>
+                    </div>
+                    <div class="search-box">
+                        <i class="fa-solid fa-filter search-icon"></i>
+                        <input type="text" id="inputFilterPacket" placeholder="Filter IP, MAC, action, details..." class="console-search-input">
+                        <button class="search-clear-btn" id="btnClearPacketSearch" style="display:none;">&times;</button>
+                    </div>
+                    <div class="capture-toggle-group">
+                        <label class="switch-label" title="Toggle Real-Time Packet Capture (Save CPU horsepower when disabled)">
+                            <input type="checkbox" id="togglePacketCapture" checked>
+                            <span class="switch-slider"></span>
+                            <span class="switch-text" id="labelPacketCaptureSwitch">Capture</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="cpu-saver-banner" id="bannerCpuSaverPacket" style="display:none;">
+                    <i class="fa-solid fa-leaf green"></i>
+                    <div class="banner-text">
+                        <strong>CPU Saver Active:</strong> Real-time packet telemetry is paused to maximize forwarding speed.
+                    </div>
+                    <button class="btn btn-xs btn-outline" id="btnResumePacketLogging">Resume</button>
+                </div>
+                <div class="packet-stream-container" id="packetStreamContainer">
+                    <div class="packet-stream-header-row">
+                        <span class="col-time">Time</span>
+                        <span class="col-action">Action</span>
+                        <span class="col-proto">Proto</span>
+                        <span class="col-flow">Source → Destination</span>
+                        <span class="col-size">Size</span>
+                        <span class="col-details">Details</span>
+                    </div>
+                    <div class="packet-stream-list" id="packetStreamList">
+                        <div class="log-empty-state">No packet activity captured yet. Start a session or scan to view live packets.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Window Footer Status Bar -->
+        <div class="mini-console-footer">
+            <div class="footer-status-left">
+                <span id="footerLogStatusText">Buffer: 0 logs | 0 packets</span>
+                <span class="footer-separator">•</span>
+                <span id="footerStreamStatus"><i class="fa-solid fa-circle-dot green"></i> Streaming Live</span>
+            </div>
+            <div class="footer-status-right">
+                <span id="footerAutoScrollStatus"><i class="fa-solid fa-lock"></i> Auto-Scroll: ON</span>
             </div>
         </div>
     </div>

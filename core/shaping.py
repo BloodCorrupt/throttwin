@@ -299,9 +299,16 @@ class TrafficShaper:
 
                 # Fuzzy throttle: randomly alternate between restrict and release
                 # When releasing, bypass the token bucket entirely (full speed burst)
+                from .logger import log_packet
+                proto_name = "IPv4" if IP in pkt else ("IPv6" if IPv6 in pkt else "ETH")
+                src_label = self.target_ip if is_upstream else self.router_ip
+                dst_label = self.router_ip if is_upstream else self.target_ip
+
                 if self.fuzzy_enabled and not self.fuzzy_ctrl.should_throttle():
                     pass  # RELEASE phase — forward at full speed
                 elif not self.bucket.consume(pkt_len):
+                    log_packet("DROP", proto_name, src_label, dst_label, length=pkt_len,
+                               details=f"TokenBucket rate-limit drop ({pkt_len} B)", session_id=self.interface)
                     continue  # Packet dropped — enforcing rate limit
 
                 self.total_bytes += pkt_len
@@ -318,6 +325,8 @@ class TrafficShaper:
                         else:
                             fwd = Ether(src=self.my_mac, dst=self.router_mac) / pkt.payload
                         sendp(fwd, iface=npf_iface, verbose=0)
+                        log_packet("FWD", proto_name, self.target_ip, self.router_ip, length=pkt_len,
+                                   details=f"Upstream -> Gateway ({pkt_len} B)", session_id=self.interface)
                     else:
                         if IP in pkt:
                             fwd = Ether(src=self.my_mac, dst=self.target_mac) / pkt[IP]
@@ -326,6 +335,8 @@ class TrafficShaper:
                         else:
                             fwd = Ether(src=self.my_mac, dst=self.target_mac) / pkt.payload
                         sendp(fwd, iface=npf_iface, verbose=0)
+                        log_packet("FWD", proto_name, self.router_ip, self.target_ip, length=pkt_len,
+                                   details=f"Downstream -> Target ({pkt_len} B)", session_id=self.interface)
                 except Exception as e:
                     log.debug(f"Forward error (interface reconnecting?): {e}")
                     npf_iface = get_scapy_interface(self.interface)
