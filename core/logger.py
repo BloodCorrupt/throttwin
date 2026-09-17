@@ -30,6 +30,11 @@ _packet_capture_enabled = True
 
 _broadcast_callback = None
 _handler_installed = False
+_flusher_started = False
+
+_pending_debug_batch = []
+_pending_packet_batch = []
+_batch_lock = threading.Lock()
 
 
 def register_broadcast_callback(callback):
@@ -37,6 +42,7 @@ def register_broadcast_callback(callback):
     global _broadcast_callback
     with _lock:
         _broadcast_callback = callback
+    _ensure_flusher_running()
 
 
 def _dispatch_broadcast(event_type, data):
@@ -45,6 +51,44 @@ def _dispatch_broadcast(event_type, data):
     if cb:
         try:
             cb(event_type, data)
+        except Exception:
+            pass
+
+
+def _ensure_flusher_running():
+    """Ensure the background SSE batch flusher thread is running."""
+    global _flusher_started
+    with _lock:
+        if _flusher_started:
+            return
+        _flusher_started = True
+        t = threading.Thread(target=_batch_flusher_loop, daemon=True)
+        t.start()
+
+
+def _batch_flusher_loop():
+    """Flushes pending buffered packet and log events every 500ms to avoid SSE flood."""
+    while True:
+        try:
+            time.sleep(0.5)
+            with _batch_lock:
+                debug_batch = list(_pending_debug_batch)
+                _pending_debug_batch.clear()
+
+                packet_batch = list(_pending_packet_batch)
+                _pending_packet_batch.clear()
+
+            if debug_batch:
+                if len(debug_batch) == 1:
+                    _dispatch_broadcast("log_event", debug_batch[0])
+                else:
+                    _dispatch_broadcast("log_batch", {"events": debug_batch})
+
+            if packet_batch:
+                if len(packet_batch) == 1:
+                    _dispatch_broadcast("packet_event", packet_batch[0])
+                else:
+                    _dispatch_broadcast("packet_batch", {"events": packet_batch})
         except Exception:
             pass
 
@@ -89,8 +133,13 @@ class ThrottwinLogHandler(logging.Handler):
                 }
                 _debug_logs.append(entry)
 
-            # Broadcast to SSE clients
-            _dispatch_broadcast("log_event", entry)
+            # High priority logs (WARNING/ERROR/CRITICAL) dispatch immediately; INFO/DEBUG batch smoothly
+            if record.levelno >= logging.WARNING:
+                _dispatch_broadcast("log_event", entry)
+            else:
+                with _batch_lock:
+                    if len(_pending_debug_batch) < 100:
+                        _pending_debug_batch.append(entry)
         except Exception:
             self.handleError(record)
 
@@ -112,6 +161,7 @@ def install_log_handler():
             root_logger.setLevel(logging.INFO)
             
         _handler_installed = True
+    _ensure_flusher_running()
 
 
 # ─── Packet Activity Telemetry ────────────────────────────────────────────────
@@ -128,6 +178,7 @@ def log_packet(action, proto, src, dst, length=0, details="", session_id=None):
     try:
         now = time.time()
         time_str = datetime.fromtimestamp(now).strftime("%H:%M:%S.%f")[:-3]
+        action_str = str(action).upper()
 
         with _lock:
             pkt_id = _next_packet_id
@@ -136,7 +187,7 @@ def log_packet(action, proto, src, dst, length=0, details="", session_id=None):
                 "id": pkt_id,
                 "timestamp": now,
                 "time_str": time_str,
-                "action": str(action).upper(),
+                "action": action_str,
                 "proto": str(proto).upper(),
                 "src": str(src or "-"),
                 "dst": str(dst or "-"),
@@ -146,8 +197,13 @@ def log_packet(action, proto, src, dst, length=0, details="", session_id=None):
             }
             _packet_logs.append(entry)
 
-        # Broadcast to SSE clients
-        _dispatch_broadcast("packet_event", entry)
+        # High-priority / rare control events dispatch immediately; routine FWD/DROP batch smoothly
+        if action_str in ("SPOOF", "DISCOVER", "PROBE", "RESTORE"):
+            _dispatch_broadcast("packet_event", entry)
+        else:
+            with _batch_lock:
+                if len(_pending_packet_batch) < 100:
+                    _pending_packet_batch.append(entry)
     except Exception:
         pass
 

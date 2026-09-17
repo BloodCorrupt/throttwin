@@ -21,9 +21,13 @@ class ThrottwinApp {
         this.timerInterval = null;
         this.isScanning = false;
 
-        // Mini Console & Packet Stream State
+        // Mini Console & Packet Stream State (1-Second Lag-Free Throttled Rendering)
+        this.MAX_IN_MEMORY_LOGS = 500;
+        this.MAX_DOM_ROWS = 150;
         this.debugLogs = [];
         this.packetLogs = [];
+        this.debugLogsDirty = false;
+        this.packetLogsDirty = false;
         this.consoleActiveTab = 'debug';
         this.consoleAutoScroll = true;
         this.consolePaused = false;
@@ -89,6 +93,7 @@ class ThrottwinApp {
     async init() {
         this.bindEvents();
         this.initConsole();
+        this._startConsoleRenderLoop();
         await this.loadInterfaces();
         await this.loadRules();
         await this.fetchStatus();
@@ -377,8 +382,16 @@ class ThrottwinApp {
                 this.onLogEvent(data);
                 break;
 
+            case "log_batch":
+                this.onLogBatch(data.events || data);
+                break;
+
             case "packet_event":
                 this.onPacketEvent(data);
+                break;
+
+            case "packet_batch":
+                this.onPacketBatch(data.events || data);
                 break;
 
             case "logs_cleared":
@@ -2459,89 +2472,92 @@ class ThrottwinApp {
         this.scrollConsoleToBottom();
     }
 
-    // ─── Realtime Event Handlers ──────────────────────────────────────────
+    // ─── Realtime Event Handlers & 1-Second Throttled Render Loop ─────────
+
+    _startConsoleRenderLoop() {
+        if (this.consoleRenderInterval) {
+            clearInterval(this.consoleRenderInterval);
+        }
+        // 1-second update cycle (lag-free, zero-freeze)
+        this.consoleRenderInterval = setInterval(() => {
+            const win = document.getElementById('miniConsoleWindow');
+            const isVisible = win && !win.classList.contains('hidden');
+
+            if (this.debugLogsDirty || this.packetLogsDirty) {
+                this.updateConsoleBadges();
+            }
+
+            if (!isVisible || this.consolePaused) return;
+
+            if (this.consoleActiveTab === 'debug' && this.debugLogsDirty) {
+                this.renderDebugLogs();
+                this.debugLogsDirty = false;
+            } else if (this.consoleActiveTab === 'packet' && this.packetLogsDirty) {
+                this.renderPacketLogs();
+                this.packetLogsDirty = false;
+            }
+        }, 1000);
+    }
 
     onLogEvent(entry) {
         if (!entry) return;
         this.debugLogs.push(entry);
-        if (this.debugLogs.length > 1000) {
-            this.debugLogs.shift();
+        if (this.debugLogs.length > this.MAX_IN_MEMORY_LOGS) {
+            this.debugLogs.splice(0, this.debugLogs.length - this.MAX_IN_MEMORY_LOGS);
         }
-
-        const isErr = entry.level === 'ERROR' || entry.level === 'CRITICAL';
-        if (isErr) {
+        if (entry.level === 'ERROR' || entry.level === 'CRITICAL') {
             this.unreadErrorsCount += 1;
         }
+        this.debugLogsDirty = true;
+    }
 
-        this.updateConsoleBadges();
-
-        if (this.consolePaused) return;
-
-        // If currently in debug tab and matches filters, append to DOM directly
-        if (this.consoleActiveTab === 'debug' && this._matchesDebugFilter(entry)) {
-            const container = document.getElementById('terminalDebugContent');
-            if (container) {
-                const empty = container.querySelector('.log-empty-state');
-                if (empty) empty.remove();
-
-                const el = document.createElement('div');
-                el.innerHTML = this._createLogEntryHtml(entry);
-                container.appendChild(el.firstElementChild);
-
-                // Cap DOM children
-                while (container.children.length > 500) {
-                    container.removeChild(container.firstChild);
-                }
-
-                if (this.consoleAutoScroll) {
-                    this.scrollConsoleToBottom();
-                }
+    onLogBatch(entries) {
+        if (!entries || !entries.length) return;
+        for (let i = 0; i < entries.length; i++) {
+            const entry = entries[i];
+            this.debugLogs.push(entry);
+            if (entry.level === 'ERROR' || entry.level === 'CRITICAL') {
+                this.unreadErrorsCount += 1;
             }
         }
+        if (this.debugLogs.length > this.MAX_IN_MEMORY_LOGS) {
+            this.debugLogs.splice(0, this.debugLogs.length - this.MAX_IN_MEMORY_LOGS);
+        }
+        this.debugLogsDirty = true;
     }
 
     onPacketEvent(entry) {
         if (!entry) return;
         this.packetLogs.push(entry);
-        if (this.packetLogs.length > 1000) {
-            this.packetLogs.shift();
+        if (this.packetLogs.length > this.MAX_IN_MEMORY_LOGS) {
+            this.packetLogs.splice(0, this.packetLogs.length - this.MAX_IN_MEMORY_LOGS);
         }
-
         this.recentPacketTimestamps.push(Date.now());
-        this.updateConsoleBadges();
+        this.packetLogsDirty = true;
+    }
 
-        if (this.consolePaused) return;
-
-        // If currently in packet tab and matches filters, append to DOM directly
-        if (this.consoleActiveTab === 'packet' && this._matchesPacketFilter(entry)) {
-            const list = document.getElementById('packetStreamList');
-            if (list) {
-                const empty = list.querySelector('.log-empty-state');
-                if (empty) empty.remove();
-
-                const el = document.createElement('div');
-                el.innerHTML = this._createPacketRowHtml(entry);
-                list.appendChild(el.firstElementChild);
-
-                // Cap DOM children
-                while (list.children.length > 500) {
-                    list.removeChild(list.firstChild);
-                }
-
-                if (this.consoleAutoScroll) {
-                    this.scrollConsoleToBottom();
-                }
-            }
+    onPacketBatch(entries) {
+        if (!entries || !entries.length) return;
+        const now = Date.now();
+        for (let i = 0; i < entries.length; i++) {
+            this.packetLogs.push(entries[i]);
+            this.recentPacketTimestamps.push(now);
         }
+        if (this.packetLogs.length > this.MAX_IN_MEMORY_LOGS) {
+            this.packetLogs.splice(0, this.packetLogs.length - this.MAX_IN_MEMORY_LOGS);
+        }
+        this.packetLogsDirty = true;
     }
 
     onLogsCleared(type) {
         if (type === 'debug' || type === 'all') {
             this.debugLogs = [];
+            this.debugLogsDirty = false;
             this.renderDebugLogs();
         }
         if (type === 'packet' || type === 'all') {
             this.packetLogs = [];
+            this.packetLogsDirty = false;
             this.renderPacketLogs();
         }
         this.unreadErrorsCount = 0;
@@ -2630,7 +2646,9 @@ class ThrottwinApp {
             return;
         }
 
-        container.innerHTML = filtered.map(e => this._createLogEntryHtml(e)).join('');
+        // Strictly enforce threshold of max visible DOM rows to keep memory and rendering fast
+        const visibleLogs = filtered.slice(-this.MAX_DOM_ROWS);
+        container.innerHTML = visibleLogs.map(e => this._createLogEntryHtml(e)).join('');
         if (this.consoleAutoScroll) {
             this.scrollConsoleToBottom();
         }
@@ -2646,7 +2664,9 @@ class ThrottwinApp {
             return;
         }
 
-        list.innerHTML = filtered.map(e => this._createPacketRowHtml(e)).join('');
+        // Strictly enforce threshold of max visible DOM rows to keep memory and rendering fast
+        const visiblePkts = filtered.slice(-this.MAX_DOM_ROWS);
+        list.innerHTML = visiblePkts.map(e => this._createPacketRowHtml(e)).join('');
         if (this.consoleAutoScroll) {
             this.scrollConsoleToBottom();
         }
