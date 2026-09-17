@@ -9,6 +9,7 @@ from core.config import (
     load_predefined_rules, save_predefined_rules,
     load_config, save_config, RULES_FILE
 )
+from core.core_tools import get_core_status, download_arp_scan, is_arp_scan_installed
 
 log = logging.getLogger("throttwin.web")
 
@@ -46,14 +47,15 @@ def sse_stream():
     def event_generator():
         q = engine.subscribe_events()
         try:
-            # Send initial state for all sessions
+            # Send initial state for all sessions + core tools status
             all_states = engine.get_all_sessions_state()
             session_ids = list(all_states.keys())
             initial = json.dumps({
                 "type": "init",
                 "sessions": all_states,
                 "session_ids": session_ids,
-                "active_session_id": session_ids[0] if session_ids else None
+                "active_session_id": session_ids[0] if session_ids else None,
+                "core": get_core_status()
             })
             yield f"data: {initial}\n\n"
             while True:
@@ -69,6 +71,57 @@ def sse_stream():
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
         "Connection": "keep-alive",
+    })
+
+
+# ─── Core Tools Management ───────────────────────────────────────────────────
+
+@app.route("/api/core/status")
+def get_core_tools_status():
+    """Get status of native core binaries (arp-scan.exe)."""
+    return jsonify({
+        "success": True,
+        "core": get_core_status()
+    })
+
+
+@app.route("/api/core/download", methods=["POST"])
+def download_core_tool():
+    """Download and install arp-scan.exe from GitHub repository."""
+    data = request.get_json(silent=True) or {}
+    arch = data.get("arch")  # Optional override 'x64' or 'x86'
+    
+    ok, msg = download_arp_scan(arch=arch)
+    core_status = get_core_status()
+    
+    # Broadcast status change to all open web clients
+    engine.broadcast_event("core_tools_updated", {
+        "core": core_status,
+        "message": msg,
+        "installed": ok
+    })
+
+    if ok:
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "core": core_status
+        })
+    return jsonify({
+        "success": False,
+        "error": msg,
+        "core": core_status
+    }), 500
+
+
+@app.route("/api/core/verify", methods=["POST"])
+def verify_core_tool():
+    """Verify execution of installed core binaries."""
+    installed = is_arp_scan_installed()
+    return jsonify({
+        "success": installed,
+        "installed": installed,
+        "core": get_core_status()
     })
 
 
@@ -171,11 +224,14 @@ def scan_network():
     if data.get("router_ip"):
         session.router_ip = data["router_ip"]
 
-    devs = session.scan()
+    aggressive = bool(data.get("aggressive", True))
+    devs = session.scan(aggressive=aggressive)
     return jsonify({
         "success": True,
         "devices": devs,
         "count": len(devs),
+        "aggressive": aggressive,
+        "engine": "Dual-Engine (Native C + Win32 Multi-Vector)" if (aggressive and is_arp_scan_installed()) else "Win32 Multi-Vector",
         "session_id": session.session_id
     })
 

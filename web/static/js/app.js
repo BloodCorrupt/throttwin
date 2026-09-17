@@ -14,6 +14,8 @@ class ThrottwinApp {
         // Shared state
         this.rules = { whitelist: {}, blacklist: {} };
         this.availableInterfaces = [];
+        this.coreStatus = null;
+        this.isDownloadingCore = false;
 
         this.eventSource = null;
         this.timerInterval = null;
@@ -71,6 +73,7 @@ class ThrottwinApp {
         await this.loadInterfaces();
         await this.loadRules();
         await this.fetchStatus();
+        await this.fetchCoreStatus();
         this.initSSE();
         this.startLocalTimer();
     }
@@ -117,6 +120,10 @@ class ThrottwinApp {
         switch (type) {
             case "init":
                 // Multi-session init
+                if (payload.core) {
+                    this.coreStatus = payload.core;
+                    this.updateCoreUI();
+                }
                 if (payload.sessions) {
                     this.sessionIds = payload.session_ids || Object.keys(payload.sessions);
                     for (const [id, state] of Object.entries(payload.sessions)) {
@@ -134,6 +141,16 @@ class ThrottwinApp {
                     if (!active.devices || active.devices.length === 0) {
                         this.triggerScan();
                     }
+                }
+                break;
+
+            case "core_tools_updated":
+                if (payload.core || data.core) {
+                    this.coreStatus = payload.core || data.core;
+                    this.updateCoreUI();
+                }
+                if (payload.message || data.message) {
+                    this.showToast(payload.message || data.message, (payload.installed || data.installed) ? 'success' : 'info');
                 }
                 break;
 
@@ -400,10 +417,16 @@ class ThrottwinApp {
 
         // Rescan and Add Device Buttons
         const btnRescanTop = document.getElementById('btnRescanTop');
-        if (btnRescanTop) btnRescanTop.addEventListener('click', () => this.triggerScan());
+        if (btnRescanTop) btnRescanTop.addEventListener('click', () => this.triggerScan(false));
+
+        const btnAggressiveTop = document.getElementById('btnAggressiveScanTop');
+        if (btnAggressiveTop) btnAggressiveTop.addEventListener('click', () => this.triggerScan(true));
 
         const btnScanTab = document.getElementById('btnScanDevicesTab');
-        if (btnScanTab) btnScanTab.addEventListener('click', () => this.triggerScan());
+        if (btnScanTab) btnScanTab.addEventListener('click', () => this.triggerScan(false));
+
+        const btnAggressiveTab = document.getElementById('btnAggressiveScanTab');
+        if (btnAggressiveTab) btnAggressiveTab.addEventListener('click', () => this.triggerScan(true));
 
         const btnManualTop = document.getElementById('btnManualAddTop');
         if (btnManualTop) btnManualTop.addEventListener('click', () => this.openModal('manualDeviceModal'));
@@ -413,6 +436,16 @@ class ThrottwinApp {
 
         const btnClearTab = document.getElementById('btnClearCacheTab');
         if (btnClearTab) btnClearTab.addEventListener('click', () => this.clearCache());
+
+        // Core Engine Download & Verify Buttons
+        const btnDlSidebar = document.getElementById('btnDownloadCoreSidebar');
+        if (btnDlSidebar) btnDlSidebar.addEventListener('click', () => this.downloadCoreEngine());
+
+        const btnDlSettings = document.getElementById('btnDownloadCoreSettings');
+        if (btnDlSettings) btnDlSettings.addEventListener('click', () => this.downloadCoreEngine());
+
+        const btnVerifySettings = document.getElementById('btnVerifyCoreSettings');
+        if (btnVerifySettings) btnVerifySettings.addEventListener('click', () => this.verifyCoreEngine());
 
         // Submit Manual Device
         const btnSubMan = document.getElementById('btnSubmitManualDevice');
@@ -1521,13 +1554,149 @@ class ThrottwinApp {
         }
     }
 
-    async triggerScan() {
+    /* ==========================================================
+       CORE NATIVE ENGINE (arp-scan.exe) MANAGEMENT
+       ========================================================== */
+    async fetchCoreStatus() {
+        try {
+            const res = await fetch('/api/core/status');
+            const data = await res.json();
+            if (data.success && data.core) {
+                this.coreStatus = data.core;
+                this.updateCoreUI();
+            }
+        } catch (e) {
+            console.error('Error fetching core status:', e);
+        }
+    }
+
+    updateCoreUI() {
+        if (!this.coreStatus || !this.coreStatus.arp_scan) return;
+        const arp = this.coreStatus.arp_scan;
+
+        const pill = document.getElementById('sidebarCoreStatusPill');
+        const pillText = document.getElementById('sidebarCoreStatusText');
+        const desc = document.getElementById('sidebarCoreDesc');
+        const btnSidebar = document.getElementById('btnDownloadCoreSidebar');
+        const btnSidebarText = document.getElementById('btnDownloadCoreText');
+        const iconSidebar = document.getElementById('iconDownloadCore');
+
+        const settingsPathVal = document.getElementById('settingsCorePathVal');
+        const btnSettingsText = document.getElementById('btnDownloadSettingsText');
+
+        if (this.isDownloadingCore) {
+            if (pill) {
+                pill.className = 'core-status-pill downloading';
+            }
+            if (pillText) pillText.textContent = 'Installing';
+            if (desc) desc.textContent = 'Downloading from GitHub repository...';
+            if (btnSidebar) {
+                btnSidebar.disabled = true;
+                btnSidebar.className = 'btn btn-core-action';
+            }
+            if (btnSidebarText) btnSidebarText.textContent = 'Downloading...';
+            if (iconSidebar) iconSidebar.className = 'fa-solid fa-spinner fa-spin';
+            if (btnSettingsText) btnSettingsText.textContent = 'Downloading...';
+            if (settingsPathVal) settingsPathVal.innerHTML = '<span class="badge badge-pulse-glow"><i class="fa-solid fa-spinner fa-spin"></i> Downloading from GitHub...</span>';
+            return;
+        }
+
+        if (arp.installed) {
+            if (pill) {
+                pill.className = 'core-status-pill ready';
+            }
+            if (pillText) pillText.textContent = 'Ready';
+            if (desc) desc.textContent = '⚡ Double-Power C-Engine Active.';
+            if (btnSidebar) {
+                btnSidebar.disabled = false;
+                btnSidebar.className = 'btn btn-core-action installed';
+                btnSidebar.title = 'arp-scan is installed and active! Click to reinstall.';
+            }
+            if (btnSidebarText) btnSidebarText.textContent = 'Reinstall Core';
+            if (iconSidebar) iconSidebar.className = 'fa-solid fa-circle-check';
+            if (btnSettingsText) btnSettingsText.textContent = 'Reinstall Core (x64)';
+            if (settingsPathVal) {
+                const kb = Math.round((arp.size_bytes || 0) / 1024);
+                settingsPathVal.innerHTML = `<span class="badge badge-whitelist"><i class="fa-solid fa-circle-check"></i> Installed & Ready (${kb} KB)</span> <span class="font-mono text-muted" style="margin-left: 8px; font-size: 0.78rem;">${arp.path}</span>`;
+            }
+        } else {
+            if (pill) {
+                pill.className = 'core-status-pill missing';
+            }
+            if (pillText) pillText.textContent = 'Optional';
+            if (desc) desc.textContent = 'Install for instant double-power C scan.';
+            if (btnSidebar) {
+                btnSidebar.disabled = false;
+                btnSidebar.className = 'btn btn-core-action';
+                btnSidebar.title = 'Click to download and install arp-scan from GitHub';
+            }
+            if (btnSidebarText) btnSidebarText.textContent = 'Download Core';
+            if (iconSidebar) iconSidebar.className = 'fa-solid fa-cloud-arrow-down';
+            if (btnSettingsText) btnSettingsText.textContent = 'Download & Install Core';
+            if (settingsPathVal) {
+                settingsPathVal.innerHTML = `<span class="badge badge-idle"><i class="fa-solid fa-circle-exclamation"></i> Not Installed</span> <span class="text-muted" style="margin-left: 8px;">(Will use fallback Win32 SendARP)</span>`;
+            }
+        }
+    }
+
+    async downloadCoreEngine() {
+        if (this.isDownloadingCore) return;
+        this.isDownloadingCore = true;
+        this.updateCoreUI();
+        this.showToast('Downloading arp-scan C-Engine from GitHub...', 'info');
+
+        try {
+            const res = await fetch('/api/core/download', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.coreStatus = data.core;
+                this.showToast(data.message || 'arp-scan.exe installed successfully! ⚡ Double-Power mode active.', 'success');
+            } else {
+                this.showToast(data.error || 'Failed to download core tool.', 'error');
+            }
+        } catch (e) {
+            this.showToast('Network error while downloading core binary.', 'error');
+        } finally {
+            this.isDownloadingCore = false;
+            await this.fetchCoreStatus();
+        }
+    }
+
+    async verifyCoreEngine() {
+        try {
+            const res = await fetch('/api/core/verify', { method: 'POST' });
+            const data = await res.json();
+            if (data.success) {
+                this.showToast('arp-scan.exe verified and responding properly!', 'success');
+            } else {
+                this.showToast('arp-scan is not installed or failed verification.', 'warning');
+            }
+            if (data.core) {
+                this.coreStatus = data.core;
+                this.updateCoreUI();
+            }
+        } catch (e) {
+            this.showToast('Error verifying core binary.', 'error');
+        }
+    }
+
+
+    /* ==========================================================
+       6. SCANNING
+       ========================================================== */
+    async triggerScan(isAggressive = false) {
         if (this.isScanning) return;
         this.isScanning = true;
         const sess = this.getActiveSession();
 
         const btnTop = document.getElementById('btnRescanTop');
+        const btnAggTop = document.getElementById('btnAggressiveScanTop');
         const btnTab = document.getElementById('btnScanDevicesTab');
+        const btnAggTab = document.getElementById('btnAggressiveScanTab');
         const statusBanner = document.getElementById('scannerStatusBanner');
         const statusText = document.getElementById('scannerStatusText');
 
@@ -1535,16 +1704,26 @@ class ThrottwinApp {
             btnTop.disabled = true;
             btnTop.innerHTML = '<i class="fa-solid fa-arrows-rotate fa-spin"></i> <span>Scanning...</span>';
         }
+        if (btnAggTop) {
+            btnAggTop.disabled = true;
+            btnAggTop.innerHTML = '<i class="fa-solid fa-bolt-lightning fa-spin cyan"></i> <span>Sweeping...</span>';
+        }
         if (btnTab) {
             btnTab.disabled = true;
-            btnTab.innerHTML = '<i class="fa-solid fa-arrows-rotate fa-spin"></i> Rescanning...';
+            btnTab.innerHTML = '<i class="fa-solid fa-arrows-rotate fa-spin"></i> Fast Scan...';
+        }
+        if (btnAggTab) {
+            btnAggTab.disabled = true;
+            btnAggTab.innerHTML = '<i class="fa-solid fa-bolt-lightning fa-spin cyan"></i> Aggressive Sweep...';
         }
         if (statusBanner && statusText) {
             statusBanner.className = 'scanner-status-banner scanning';
-            statusText.textContent = `Scanning ${sess.session_id} (Win32 SendARP)...`;
+            statusText.textContent = isAggressive
+                ? `⚡ Aggressive Dual-Engine Deep Sweep on ${sess.session_id}...`
+                : `Scanning ${sess.session_id} (Win32 SendARP)...`;
         }
 
-        this.showToast(`Scanning ${sess.session_id}...`, 'info');
+        this.showToast(isAggressive ? `⚡ Aggressive Deep Sweep on ${sess.session_id}...` : `Scanning ${sess.session_id}...`, 'info');
 
         try {
             const res = await fetch('/api/scan', {
@@ -1553,7 +1732,8 @@ class ThrottwinApp {
                 body: JSON.stringify({
                     session_id: sess.session_id,
                     interface: sess.interface,
-                    router_ip: sess.router_ip
+                    router_ip: sess.router_ip,
+                    aggressive: isAggressive
                 })
             });
             const data = await res.json();
@@ -1562,10 +1742,11 @@ class ThrottwinApp {
                 this.renderDashboardTable();
                 this.renderScannerTable();
                 this.renderSessionTabs();
-                this.showToast(`Scan complete on ${sess.session_id}: found ${data.count} device(s).`, 'success');
+                const engineLabel = data.engine ? ` [${data.engine}]` : '';
+                this.showToast(`Scan complete on ${sess.session_id}: found ${data.count} device(s)${engineLabel}`, 'success');
                 if (statusBanner && statusText) {
                     statusBanner.className = 'scanner-status-banner';
-                    statusText.textContent = `[${sess.session_id}] ${data.count} device(s) online.`;
+                    statusText.textContent = `[${sess.session_id}] ${data.count} device(s) online${engineLabel}.`;
                 }
             } else {
                 this.showToast('Scan failed: ' + (data.error || 'Unknown error'), 'error');
@@ -1578,9 +1759,17 @@ class ThrottwinApp {
                 btnTop.disabled = false;
                 btnTop.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> <span>Scan</span>';
             }
+            if (btnAggTop) {
+                btnAggTop.disabled = false;
+                btnAggTop.innerHTML = '<i class="fa-solid fa-bolt-lightning cyan"></i> <span>Aggressive</span>';
+            }
             if (btnTab) {
                 btnTab.disabled = false;
-                btnTab.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Rescan Network';
+                btnTab.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Fast Scan';
+            }
+            if (btnAggTab) {
+                btnAggTab.disabled = false;
+                btnAggTab.innerHTML = '<i class="fa-solid fa-bolt-lightning cyan"></i> Aggressive Sweep';
             }
         }
     }

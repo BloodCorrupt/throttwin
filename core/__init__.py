@@ -24,6 +24,10 @@ from .config import (
     CONFIG_DIR, CONFIG_FILE, RULES_FILE,
 )
 from .engine import ThrottwinEngine
+from .core_tools import (
+    get_core_status, download_arp_scan, is_arp_scan_installed,
+    run_arp_scan_native, get_arp_scan_path
+)
 
 __all__ = [
     # console
@@ -55,4 +59,7 @@ __all__ = [
     "CONFIG_DIR", "CONFIG_FILE", "RULES_FILE",
     # engine
     "ThrottwinEngine",
+    # core tools
+    "get_core_status", "download_arp_scan", "is_arp_scan_installed",
+    "run_arp_scan_native", "get_arp_scan_path",
 ]

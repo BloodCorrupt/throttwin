@@ -11,6 +11,10 @@ __pycache__/
 # Config and Sessions
 config/
 
+# Native Binaries Temporary Files
+bin/*.tmp
+bin/*.exe
+
 # OS generated files
 .DS_Store
 Thumbs.db

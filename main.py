@@ -49,7 +49,11 @@ def banner():
     print()
     print(figlet_format("Throttwin", font="standard").rstrip())
     console.print("  [dim]Per-device bandwidth limiter via ARP spoofing[/dim]")
-    console.print("  [dim]Windows Edition — powered by Scapy + Npcap[/dim]")
+    from core.core_tools import is_arp_scan_installed
+    if is_arp_scan_installed():
+        console.print("  [dim]Windows Edition — [bold cyan]Double-Powered by arp-scan (x64 C-Engine)[/bold cyan][/dim]")
+    else:
+        console.print("  [dim]Windows Edition — powered by Scapy + Npcap[/dim]")
     print()
 
 

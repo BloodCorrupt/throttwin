@@ -88,7 +88,12 @@ class InterfaceSession:
     def _bg_discovery_worker(self):
         first_run = True
         while not self._bg_stop.is_set():
-            delay = 1.0 if first_run else 8.0
+            cfg = load_config() or {}
+            interval = float(cfg.get("discovery_interval", 6.0))
+            if interval <= 0:
+                interval = 6.0
+
+            delay = 0.5 if first_run else interval
             if self._bg_stop.wait(delay):
                 break
             first_run = False
@@ -96,7 +101,7 @@ class InterfaceSession:
             if not self.interface or not self.router_ip or self.link_status == "DISCONNECTED":
                 continue
             try:
-                fresh = arp_scan(self.interface, self.router_ip)
+                fresh = arp_scan(self.interface, self.router_ip, aggressive=True)
                 my_ip, my_mac = get_interface_ip_and_mac(self.interface)
                 router_mac = resolve_mac_from_arp_cache(self.router_ip, interface_ip=my_ip)
                 with self.lock:
@@ -188,10 +193,10 @@ class InterfaceSession:
 
     # ─── Scanning ──────────────────────────────────────────────────────────
 
-    def scan(self):
+    def scan(self, aggressive=True):
         if not self.interface or not self.router_ip:
             return self.devices
-        fresh = arp_scan(self.interface, self.router_ip)
+        fresh = arp_scan(self.interface, self.router_ip, aggressive=aggressive)
         my_ip, my_mac = get_interface_ip_and_mac(self.interface)
         router_mac = resolve_mac_from_arp_cache(self.router_ip, interface_ip=my_ip)
         with self.lock:

@@ -10,6 +10,7 @@ Windows-native per-device bandwidth limiter via ARP spoofing — the Windows equ
 2. **Packet Interception** — Scapy sniffs the intercepted traffic on the interface via Npcap.
 3. **Token Bucket Rate Limiting** — A pure-Python Token Bucket enforces the bandwidth cap by dropping excess packets.
 4. **Packet Forwarding** — Conforming packets are re-injected with corrected MACs and forwarded to their destination.
+5. **Double-Power Aggressive ARP Discovery** — Combines native C multi-threaded ARP sweeping ([QbsuranAlang/arp-scan-windows-](https://github.com/QbsuranAlang/arp-scan-windows-)), multi-port LAN wakeup bursts (UDP 137/5353/53/80/443/8080), and Win32 SendARP for instantaneous device detection. Downloadable directly with 1-click in the Web UI sidebar.
 
 ```
 Without Throttwin:

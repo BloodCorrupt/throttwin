@@ -19,6 +19,7 @@ from .network import (
     win_send_arp,
     get_interface_ip_and_mac
 )
+from .core_tools import is_arp_scan_installed, run_arp_scan_native
 
 log = logging.getLogger("throttwin")
 
@@ -240,22 +241,32 @@ def device_sort_key(dev):
 
 def _lan_wakeup_probe(ips):
     """
-    Fast concurrent non-blocking UDP blast to ports (53, 80, 137, 5353)
-    across all IPs on the local subnet to wake sleeping Wi-Fi radios (iOS/Android).
+    Supercharged concurrent non-blocking multi-port UDP wake burst
+    across ports (137, 5353, 5355, 1900, 53, 80, 443, 8080) to wake sleeping Wi-Fi radios
+    (iOS/Android/IoT/Smart TVs) instantaneously before ARP sweep.
     Takes <0.05s.
     """
+    if not ips:
+        return
+
+    WAKE_PORTS = (137, 5353, 5355, 1900, 53, 80, 443, 8080)
+
     def _poke(ip):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(0.01)
-            # Short UDP probe
-            s.sendto(b"\x00", (ip, 137))
+            s.settimeout(0.005)
+            for port in WAKE_PORTS:
+                try:
+                    s.sendto(b"\x00", (ip, port))
+                except Exception:
+                    pass
             s.close()
         except Exception:
             pass
 
     try:
-        with ThreadPoolExecutor(max_workers=128) as ex:
+        workers = min(len(ips), 128)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(_poke, ips))
     except Exception:
         pass
@@ -316,14 +327,16 @@ def _get_arp_cache(interface_ip=None, subnet_net=None, router_ip=None, my_mac=No
     return devices
 
 
-def arp_scan(interface, router_ip, progress_callback=None):
+def arp_scan(interface, router_ip, aggressive=True, progress_callback=None):
     """
-    BEAST-MODE Multi-Vector Hybrid Network Scanner for Windows:
+    DOUBLE-POWER Multi-Vector & Aggressive Network Scanner for Windows:
       1. Computes local subnet from interface IPv4 & netmask.
-      2. Sweeps all subnet IPs simultaneously using native Win32 SendARP bound to interface.
-      3. Merges with Windows kernel ARP table (`arp -a -N interface_ip`) strictly for this subnet.
-      4. Runs multi-protocol NetBIOS, mDNS, and Reverse DNS name queries concurrently.
-      5. Applies rich OUI vendor intelligence and MAC randomization detection.
+      2. Supercharged Multi-Port Wakeup Probe (UDP 137/5353/53/80/443/8080) to wake sleeping devices.
+      3. Native C-Engine (arp-scan.exe) sweep when available (QbsuranAlang/arp-scan-windows-).
+      4. Parallel Win32 SendARP sweep bound to interface.
+      5. Merges with Windows kernel ARP table (`arp -a -N interface_ip`) strictly for this subnet.
+      6. Multi-protocol concurrent NetBIOS, mDNS, and Reverse DNS name queries.
+      7. Rich IEEE OUI vendor database + randomized MAC detection.
     """
     devices = []
 
@@ -369,9 +382,30 @@ def arp_scan(interface, router_ip, progress_callback=None):
     if len(subnet_ips) > 512:
         subnet_ips = subnet_ips[:512]
 
-    # 2. Parallel Native Win32 SendARP sweep across all subnet IPs bound to this adapter
+    # 2. Wake sleeping Wi-Fi radios immediately
+    _lan_wakeup_probe(subnet_ips)
+
     discovered = {}
-    
+
+    # 3. Native C-Engine Sweep (arp-scan.exe) if installed and aggressive mode active
+    has_native_c = is_arp_scan_installed()
+    if aggressive and has_native_c and subnet_net:
+        try:
+            # Build CIDR representation: e.g. 192.168.1.1/24 or router_ip/prefixlen
+            scan_target = f"{router_ip or my_ip}/{subnet_net.prefixlen}"
+            native_results = run_arp_scan_native(scan_target, timeout=5.0)
+            for item in native_results:
+                t_ip = item["ip"]
+                t_mac = item["mac"].lower().replace("-", ":")
+                if t_ip != router_ip and t_ip != my_ip:
+                    if (not my_mac or t_mac != my_mac) and (not router_mac or t_mac != router_mac):
+                        discovered[t_ip] = t_mac
+                        if progress_callback:
+                            progress_callback(t_ip, t_mac)
+        except Exception as e:
+            log.debug(f"Native arp-scan.exe sweep error: {e}")
+
+    # 4. Parallel Native Win32 SendARP sweep across all subnet IPs bound to this adapter
     def _scan_single_ip(target_ip):
         if target_ip == router_ip or target_ip == my_ip:
             return None
@@ -388,14 +422,14 @@ def arp_scan(interface, router_ip, progress_callback=None):
         with ThreadPoolExecutor(max_workers=workers) as ex:
             results = ex.map(_scan_single_ip, subnet_ips)
             for r in results:
-                if r:
+                if r and r[0] not in discovered:
                     discovered[r[0]] = r[1]
                     if progress_callback:
                         progress_callback(r[0], r[1])
     except Exception as e:
         log.debug(f"Win32 SendARP sweep exception: {e}")
 
-    # 3. Harvest Windows Kernel ARP Cache for this interface only
+    # 5. Harvest Windows Kernel ARP Cache for this interface only
     cache_devs = _get_arp_cache(interface_ip=my_ip, subnet_net=subnet_net, router_ip=router_ip, my_mac=my_mac, router_mac=router_mac)
     for dev in cache_devs:
         ip = dev["ip"]
@@ -404,7 +438,7 @@ def arp_scan(interface, router_ip, progress_callback=None):
             if (not my_mac or mac != my_mac) and (not router_mac or mac != router_mac):
                 discovered[ip] = mac
 
-    # 4. Build device list, enforce subnet boundary, and resolve OUI vendors
+    # 6. Build device list, enforce subnet boundary, and resolve OUI vendors
     for ip, mac in discovered.items():
         if subnet_net:
             try:
@@ -419,10 +453,10 @@ def arp_scan(interface, router_ip, progress_callback=None):
         vendor = oui_lookup(mac)
         devices.append({"ip": ip, "mac": mac, "vendor": vendor, "hostname": ""})
 
-    # 5. Populate Hostnames & Device Names
+    # 7. Populate Hostnames & Device Names
     devices = populate_hostnames(devices)
 
-    # 6. Ensure Host PC itself is explicitly included in discovered devices
+    # 8. Ensure Host PC itself is explicitly included in discovered devices
     if my_ip and my_mac:
         import socket
         host_hostname = socket.gethostname()

@@ -51,6 +51,32 @@
                 </button>
             </nav>
 
+            <!-- Sidebar Core Tools & Engine Widget -->
+            <div class="sidebar-core-widget" id="sidebarCoreWidget">
+                <div class="core-widget-header">
+                    <div class="core-widget-title">
+                        <i class="fa-solid fa-microchip cyan"></i>
+                        <span>CORE ENGINE</span>
+                    </div>
+                    <span class="core-status-pill checking" id="sidebarCoreStatusPill">
+                        <span class="core-dot"></span>
+                        <span id="sidebarCoreStatusText">Checking</span>
+                    </span>
+                </div>
+                <div class="core-widget-body">
+                    <div class="core-info-row">
+                        <span class="core-tool-name">arp-scan <span class="core-arch-tag">x64 C</span></span>
+                    </div>
+                    <p class="core-desc" id="sidebarCoreDesc">Aggressive deep sweep engine.</p>
+                    <div class="core-actions">
+                        <button class="btn btn-core-action btn-sm" id="btnDownloadCoreSidebar" title="Download & install native arp-scan C-Engine from GitHub">
+                            <i class="fa-solid fa-cloud-arrow-down" id="iconDownloadCore"></i>
+                            <span id="btnDownloadCoreText">Download Core</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
             <div class="sidebar-footer">
                 <div class="connection-status" id="liveConnectionBadge">
                     <span class="status-dot"></span>
@@ -75,9 +101,13 @@
                 </div>
 
                 <div class="topbar-actions">
-                    <button class="btn btn-secondary btn-sm" id="btnRescanTop" title="Rescan network">
+                    <button class="btn btn-secondary btn-sm" id="btnRescanTop" title="Fast multi-vector scan">
                         <i class="fa-solid fa-arrows-rotate"></i>
                         <span>Scan</span>
+                    </button>
+                    <button class="btn btn-secondary btn-sm btn-aggressive-top" id="btnAggressiveScanTop" title="Aggressive Double-Power Deep Sweep via arp-scan C-Engine">
+                        <i class="fa-solid fa-bolt-lightning cyan"></i>
+                        <span>Aggressive</span>
                     </button>
                     <button class="btn btn-secondary btn-sm" id="btnManualAddTop" title="Add device by IP/MAC">
                         <i class="fa-solid fa-plus"></i>
@@ -256,7 +286,10 @@
                         </div>
                         <div class="card-actions">
                             <button class="btn btn-secondary" id="btnScanDevicesTab">
-                                <i class="fa-solid fa-arrows-rotate"></i> Rescan Network
+                                <i class="fa-solid fa-arrows-rotate"></i> Fast Scan
+                            </button>
+                            <button class="btn btn-secondary btn-aggressive" id="btnAggressiveScanTab" title="Double-Power Deep Sweep using native arp-scan C-Engine + multi-port wake probes">
+                                <i class="fa-solid fa-bolt-lightning cyan"></i> Aggressive Sweep
                             </button>
                             <button class="btn btn-secondary" id="btnClearCacheTab">
                                 <i class="fa-solid fa-trash-can"></i> Clear Cache
@@ -374,7 +407,41 @@
                         </div>
                     </div>
 
-                    <!-- Section 2: Global Engine & Radar Controls -->
+                    <!-- Section 2: Native C-Engine & Core Tools -->
+                    <div class="card settings-card" style="margin-top: 20px;">
+                        <div class="card-header">
+                            <div class="card-title">
+                                <i class="fa-solid fa-microchip cyan"></i>
+                                <h3>Native Scanner Core & Binaries (arp-scan-windows)</h3>
+                            </div>
+                            <div class="card-actions">
+                                <button class="btn btn-secondary btn-sm" id="btnVerifyCoreSettings">
+                                    <i class="fa-solid fa-stethoscope"></i> Verify Engine
+                                </button>
+                                <button class="btn btn-primary btn-sm" id="btnDownloadCoreSettings">
+                                    <i class="fa-solid fa-cloud-arrow-down"></i> <span id="btnDownloadSettingsText">Download / Reinstall Core</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="core-settings-details">
+                                <div class="core-detail-row">
+                                    <span class="detail-label">Engine Name:</span>
+                                    <span class="detail-val font-mono">QbsuranAlang/arp-scan-windows- (x64 Release)</span>
+                                </div>
+                                <div class="core-detail-row">
+                                    <span class="detail-label">Status & Path:</span>
+                                    <span class="detail-val" id="settingsCorePathVal">Checking...</span>
+                                </div>
+                                <div class="core-detail-row">
+                                    <span class="detail-label">Capability:</span>
+                                    <span class="detail-val">High-throughput multi-threaded WinSock2 SendARP subnet blaster for zero-latency device detection.</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Section 3: Global Engine & Radar Controls -->
                     <div class="card settings-card" style="margin-top: 20px;">
                         <div class="card-header">
                             <div class="card-title">
@@ -390,6 +457,7 @@
                                         <span class="badge badge-whitelist">Automated</span>
                                     </div>
                                     <select id="settingDiscoveryInterval" class="input-dark select-dark">
+                                        <option value="3">Instant (Every 3s — Turbo Radar)</option>
                                         <option value="5">Fast (Every 5s — High Sensitivity)</option>
                                         <option value="8" selected>Normal (Every 8s — Recommended)</option>
                                         <option value="15">Low Overhead (Every 15s)</option>

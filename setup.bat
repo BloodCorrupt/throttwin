@@ -94,6 +94,16 @@ if errorlevel 1 (
 )
 
 echo.
+echo  Checking Native Core Scanner Tools (arp-scan)...
+echo  -----------------------------------------------
+if not exist "bin\arp-scan.exe" (
+    echo  [INFO] Downloading native arp-scan.exe C-Engine from GitHub...
+    venv\Scripts\python -c "from core.core_tools import download_arp_scan; ok, msg = download_arp_scan(); print(' ', msg)"
+) else (
+    echo  [OK] Native arp-scan.exe C-Engine is installed in bin\
+)
+
+echo.
 echo  =============================================
 echo   Setup complete!
 echo.
