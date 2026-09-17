@@ -12,6 +12,7 @@ This replaces Linux `tc` (HTB qdisc) entirely with a pure-Python solution.
 """
 
 import time
+import random
 import threading
 import logging
 import queue
@@ -65,6 +66,37 @@ class TokenBucket:
             return False
 
 
+class FuzzyController:
+    """
+    Random restrict/release state machine for "Fuzzy Throttle" mode.
+    Alternates between RESTRICT (token-bucket enforced) and RELEASE (full speed)
+    phases at random intervals between 0.5–10 seconds.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._phase = "RESTRICT"   # current phase: RESTRICT or RELEASE
+        self._next_flip = time.monotonic() + random.uniform(0.5, 10.0)
+
+    def should_throttle(self):
+        """
+        Returns True if we're in RESTRICT phase (enforce token bucket),
+        False if in RELEASE phase (let packets through at full speed).
+        Automatically flips phase when the timer expires.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if now >= self._next_flip:
+                self._phase = "RELEASE" if self._phase == "RESTRICT" else "RESTRICT"
+                self._next_flip = now + random.uniform(0.5, 10.0)
+            return self._phase == "RESTRICT"
+
+    def get_state(self):
+        with self._lock:
+            remaining = max(0, self._next_flip - time.monotonic())
+            return {"phase": self._phase, "next_flip_in": round(remaining, 1)}
+
+
 class TrafficShaper:
     """
     Per-target traffic shaper.
@@ -110,6 +142,10 @@ class TrafficShaper:
         rate_bps = int(limit_mbps * 1_000_000 / 8)
         self.bucket = TokenBucket(rate_bps)
 
+        # Fuzzy throttle mode
+        self.fuzzy_enabled = False
+        self.fuzzy_ctrl = FuzzyController()
+
         self.total_bytes     = 0
         self.last_bytes      = 0
         self.last_speed_time = time.monotonic()
@@ -131,6 +167,18 @@ class TrafficShaper:
         rate_bps = int(limit_mbps * 1_000_000 / 8)
         self.bucket.update_rate(rate_bps)
         log.info(f"Updated limit for {self.target_ip} to {limit_mbps} Mbps")
+
+    def set_fuzzy(self, enabled):
+        self.fuzzy_enabled = bool(enabled)
+        if enabled:
+            self.fuzzy_ctrl = FuzzyController()  # reset timer on enable
+        log.info(f"Fuzzy throttle {'enabled' if enabled else 'disabled'} for {self.target_ip}")
+
+    def get_fuzzy_state(self):
+        return {
+            "enabled": self.fuzzy_enabled,
+            **(self.fuzzy_ctrl.get_state() if self.fuzzy_enabled else {})
+        }
 
     def get_speed_mbps(self):
         """Return current throughput in Mbps (computed over last ~1s)."""
@@ -249,8 +297,11 @@ class TrafficShaper:
 
                 pkt_len = len(pkt)
 
-                # Token bucket: drop if over limit (meters both IPv4 and IPv6 traffic)
-                if not self.bucket.consume(pkt_len):
+                # Fuzzy throttle: randomly alternate between restrict and release
+                # When releasing, bypass the token bucket entirely (full speed burst)
+                if self.fuzzy_enabled and not self.fuzzy_ctrl.should_throttle():
+                    pass  # RELEASE phase — forward at full speed
+                elif not self.bucket.consume(pkt_len):
                     continue  # Packet dropped — enforcing rate limit
 
                 self.total_bytes += pkt_len

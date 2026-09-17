@@ -324,6 +324,20 @@ def update_limit():
     return jsonify({"success": ok, "message": msg, "limit_mbps": lim})
 
 
+@app.route("/api/session/fuzzy", methods=["POST"])
+def toggle_fuzzy():
+    data = request.get_json(silent=True) or {}
+    sid = _sid(data)
+    session = engine.get_session(sid)
+    if not session:
+        return jsonify({"success": False, "error": "No session found."}), 404
+    enabled = data.get("enabled")
+    if enabled is None:
+        return jsonify({"success": False, "error": "enabled (true/false) required."}), 400
+    ok, msg = session.toggle_fuzzy(bool(enabled))
+    return jsonify({"success": ok, "message": msg, "fuzzy_enabled": session.fuzzy_enabled})
+
+
 @app.route("/api/target/toggle", methods=["POST"])
 def toggle_target():
     data            = request.get_json(silent=True) or {}
@@ -338,6 +352,25 @@ def toggle_target():
     ok, msg = session.toggle_target(ip, bool(should_throttle))
     if ok:
         return jsonify({"success": True, "message": msg, "state": session.get_state()})
+    return jsonify({"success": False, "error": msg}), 400
+
+
+@app.route("/api/target/fuzzy", methods=["POST"])
+def toggle_target_fuzzy():
+    data    = request.get_json(silent=True) or {}
+    ip      = data.get("ip")
+    enabled = data.get("enabled")
+    sid     = _sid(data)
+    if not ip:
+        return jsonify({"success": False, "error": "ip required."}), 400
+    session = engine.get_session(sid)
+    if not session:
+        return jsonify({"success": False, "error": "No session found."}), 404
+    ok, msg = session.toggle_target_fuzzy(ip, enabled)
+    if ok:
+        shaper = session.shapers.get(ip)
+        f_state = shaper.fuzzy_enabled if shaper else False
+        return jsonify({"success": True, "message": msg, "ip": ip, "fuzzy_enabled": f_state, "state": session.get_state()})
     return jsonify({"success": False, "error": msg}), 400
 
 

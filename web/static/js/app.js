@@ -39,6 +39,7 @@ class ThrottwinApp {
             telemetry: [],
             uptime: 0,
             autoThrottledCount: 0,
+            fuzzy_enabled: false,
             selectedIps: new Set(),
         };
     }
@@ -245,6 +246,29 @@ class ThrottwinApp {
                 }
                 break;
 
+            case "fuzzy_toggled":
+                if (sid) {
+                    const sess = this._ensureSession(sid);
+                    sess.fuzzy_enabled = data.fuzzy_enabled;
+                    if (sid === this.activeSessionId) {
+                        this.updateFuzzyUI(data.fuzzy_enabled);
+                        this.renderDashboardTable();
+                    }
+                    this.showToast(`Fuzzy throttle ${data.fuzzy_enabled ? 'activated 🎲' : 'deactivated'} [${sid}]`, data.fuzzy_enabled ? 'warning' : 'info');
+                }
+                break;
+
+            case "target_fuzzy_toggled":
+                if (data.state && sid) {
+                    this._mergeSessionState(sid, data.state);
+                    if (sid === this.activeSessionId) {
+                        this.renderDashboardTable();
+                    }
+                    const stateStr = data.fuzzy_enabled ? 'activated 🎲' : 'deactivated';
+                    this.showToast(`Target ${data.ip} fuzzy throttle ${stateStr} [${sid}]`, data.fuzzy_enabled ? 'warning' : 'info');
+                }
+                break;
+
             case "session_started":
                 if (sid) {
                     const sess = this._ensureSession(sid);
@@ -316,6 +340,7 @@ class ThrottwinApp {
         if (state.operational_mode) sess.mode = state.operational_mode;
         if (state.interface) sess.interface = state.interface;
         if (state.router_ip) sess.router_ip = state.router_ip;
+        if (state.fuzzy_enabled !== undefined) sess.fuzzy_enabled = state.fuzzy_enabled;
     }
 
 
@@ -364,6 +389,10 @@ class ThrottwinApp {
         // Live Apply Button
         const btnApplyLive = document.getElementById('btnApplyLiveLimit');
         if (btnApplyLive) btnApplyLive.addEventListener('click', () => this.applyLiveLimit());
+
+        // Fuzzy Throttle Toggle
+        const btnFuzzy = document.getElementById('btnFuzzyToggle');
+        if (btnFuzzy) btnFuzzy.addEventListener('click', () => this.toggleFuzzy());
 
         // Session Control Button
         const btnSession = document.getElementById('btnSessionControl');
@@ -493,6 +522,48 @@ class ThrottwinApp {
             }
         } catch (e) {
             this.showToast('Error applying live limit.', 'error');
+        }
+    }
+
+    updateFuzzyUI(enabled) {
+        const btn = document.getElementById('btnFuzzyToggle');
+        if (!btn) return;
+        if (enabled) {
+            btn.classList.add('active');
+            btn.title = 'Fuzzy Throttle: ON (randomly restricting and releasing bandwidth)';
+        } else {
+            btn.classList.remove('active');
+            btn.title = 'Fuzzy Throttle: OFF (click to toggle)';
+        }
+    }
+
+    async toggleFuzzy() {
+        const sess = this.getActiveSession();
+        if (!sess || !sess.session_id || sess.session_id === 'none') {
+            this.showToast('No active session.', 'warning');
+            return;
+        }
+        const targetState = !sess.fuzzy_enabled;
+        try {
+            const res = await fetch('/api/session/fuzzy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: sess.session_id,
+                    enabled: targetState
+                })
+            });
+            const data = await res.json();
+            if (data.success) {
+                sess.fuzzy_enabled = data.fuzzy_enabled;
+                this.updateFuzzyUI(sess.fuzzy_enabled);
+                this.showToast(`Fuzzy throttle ${data.fuzzy_enabled ? 'enabled 🎲' : 'disabled'} on ${sess.session_id}`, data.fuzzy_enabled ? 'warning' : 'info');
+            } else {
+                this.showToast(data.error || 'Failed to toggle fuzzy throttle.', 'danger');
+            }
+        } catch (e) {
+            console.error('Error toggling fuzzy throttle:', e);
+            this.showToast('Error communicating with server.', 'danger');
         }
     }
 
@@ -722,6 +793,7 @@ class ThrottwinApp {
         if (statData) statData.innerHTML = `${sess._totalDataMb || '0.00'} <span class="unit">MB</span>`;
 
         this.updateRadarBanner();
+        this.updateFuzzyUI(sess.fuzzy_enabled);
         this.renderDashboardTable();
     }
 
@@ -985,6 +1057,10 @@ class ThrottwinApp {
                         </div>
                     `;
                 } else {
+                    const isFuzzy = tele && tele.fuzzy_enabled !== undefined ? Boolean(tele.fuzzy_enabled) : Boolean(sess.fuzzy_enabled);
+                    const fuzzyBtn = isCurrentlyThrottled
+                        ? `<button type="button" class="btn-device-fuzzy ${isFuzzy ? 'active' : ''}" data-ip="${ip}" title="${isFuzzy ? 'Fuzzy: ON for this device (randomly restricting/releasing). Click to switch to steady limit.' : 'Fuzzy: OFF for this device (steady limit). Click to activate fuzzy mode for this device.'}"><i class="fa-solid fa-dice"></i> <span>Fuzzy</span></button>`
+                        : '';
                     statusToggleHtml = `
                         <div class="hot-toggle-wrap">
                             ${onlineDot}
@@ -993,6 +1069,7 @@ class ThrottwinApp {
                                 <span class="slider round"></span>
                             </label>
                             ${isCurrentlyThrottled ? '<span class="label-throttled">THROTTLED</span>' : '<span class="label-bypassed">BYPASSED</span>'}
+                            ${fuzzyBtn}
                             ${newBadge}
                         </div>
                     `;
@@ -1065,6 +1142,15 @@ class ThrottwinApp {
                 });
             }
 
+            // Per-Device Fuzzy Button handler
+            const fuzzyBtnEl = tr.querySelector('.btn-device-fuzzy');
+            if (fuzzyBtnEl) {
+                fuzzyBtnEl.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.toggleTargetFuzzy(ip);
+                });
+            }
+
             tbody.appendChild(tr);
         });
 
@@ -1132,6 +1218,15 @@ class ThrottwinApp {
                     dot.className = `status-dot-sm ${tele.is_online ? 'online' : 'offline'}`;
                     dot.title = tele.is_online ? 'Online & Active' : 'Probing / Offline';
                 }
+
+                const fuzzyBtnEl = tr.querySelector('.btn-device-fuzzy');
+                if (fuzzyBtnEl && tele && tele.fuzzy_enabled !== undefined) {
+                    const isFuzzy = Boolean(tele.fuzzy_enabled);
+                    fuzzyBtnEl.classList.toggle('active', isFuzzy);
+                    fuzzyBtnEl.title = isFuzzy
+                        ? 'Fuzzy: ON for this device (randomly restricting/releasing). Click to switch to steady limit.'
+                        : 'Fuzzy: OFF for this device (steady limit). Click to activate fuzzy mode for this device.';
+                }
             } else {
                 if (speedCell) {
                     needsFullRender = true;
@@ -1164,6 +1259,33 @@ class ThrottwinApp {
         } catch (e) {
             this.showToast('Network error during target toggle.', 'error');
             this.renderDashboardTable();
+        }
+    }
+
+    async toggleTargetFuzzy(ip) {
+        const sess = this.getActiveSession();
+        try {
+            const res = await fetch('/api/target/fuzzy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip, session_id: sess.session_id })
+            });
+            const data = await res.json();
+            if (data.success) {
+                if (data.state) {
+                    this._mergeSessionState(sess.session_id, data.state);
+                } else if (sess.telemetry) {
+                    const item = sess.telemetry.find(t => t.ip === ip);
+                    if (item) item.fuzzy_enabled = data.fuzzy_enabled;
+                }
+                this.renderDashboardTable();
+                this.showToast(data.message || `Fuzzy ${data.fuzzy_enabled ? 'enabled 🎲' : 'disabled'} for ${ip}`, data.fuzzy_enabled ? 'warning' : 'info');
+            } else {
+                this.showToast(data.error || 'Failed to toggle target fuzzy mode.', 'danger');
+            }
+        } catch (e) {
+            console.error('Error toggling target fuzzy:', e);
+            this.showToast('Network error during target fuzzy toggle.', 'danger');
         }
     }
 

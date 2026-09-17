@@ -50,6 +50,7 @@ class InterfaceSession:
         self.link_status = "ONLINE"
         self.operational_mode = "blacklist"
         self.limit_mbps = 1.0
+        self.fuzzy_enabled = False
 
         self.devices = []
         self.targets = []
@@ -348,6 +349,9 @@ class InterfaceSession:
                 self.interface, self.targets, self.limit_mbps,
                 self.router_ip, router_mac, my_mac, self.stop_event
             )
+            if self.fuzzy_enabled:
+                for shaper in self.shapers.values():
+                    shaper.set_fuzzy(True)
 
             for tgt in self.targets:
                 tgt_ip = tgt.get("ip") if isinstance(tgt, dict) else tgt
@@ -419,6 +423,44 @@ class InterfaceSession:
         })
         return True, f"Limit updated to {self.limit_mbps} Mbps."
 
+    def toggle_fuzzy(self, enabled):
+        """Toggle fuzzy throttle mode for all shapers in this session."""
+        self.fuzzy_enabled = bool(enabled)
+        with self.lock:
+            for shaper in self.shapers.values():
+                shaper.set_fuzzy(self.fuzzy_enabled)
+        self.engine.broadcast_event("fuzzy_toggled", {
+            "session_id": self.session_id,
+            "fuzzy_enabled": self.fuzzy_enabled
+        })
+        state = "enabled" if self.fuzzy_enabled else "disabled"
+        return True, f"Fuzzy throttle {state}."
+
+    def toggle_target_fuzzy(self, ip, enabled=None):
+        """Toggle fuzzy throttle mode for an individual target device on the fly."""
+        with self.lock:
+            if self.status != "RUNNING":
+                return False, "No session running."
+            shaper = self.shapers.get(ip)
+            if not shaper:
+                return False, f"Target {ip} is not currently throttled."
+
+            if enabled is None:
+                new_state = not shaper.fuzzy_enabled
+            else:
+                new_state = bool(enabled)
+
+            shaper.set_fuzzy(new_state)
+
+        self.engine.broadcast_event("target_fuzzy_toggled", {
+            "session_id": self.session_id,
+            "ip": ip,
+            "fuzzy_enabled": new_state,
+            "state": self.get_state()
+        })
+        state_str = "enabled" if new_state else "disabled"
+        return True, f"Fuzzy throttle {state_str} for {ip}."
+
     def toggle_target(self, ip, should_throttle):
         with self.lock:
             if self.status != "RUNNING":
@@ -444,6 +486,8 @@ class InterfaceSession:
                     self.router_ip, router_mac, my_mac,
                     self.limit_mbps, self.stop_event
                 )
+                if self.fuzzy_enabled:
+                    shaper.set_fuzzy(True)
                 self.shapers[ip] = shaper
                 self._spawn_spoofer(ip, dev_mac, router_mac, my_mac)
                 self.targets.append(target_dev)
@@ -647,7 +691,8 @@ class InterfaceSession:
                     "total_bytes": shaper.total_bytes,
                     "total_mb": round(shaper.total_bytes / (1024 * 1024), 2),
                     "is_online": True,
-                    "is_new": getattr(shaper, "is_new", False)
+                    "is_new": getattr(shaper, "is_new", False),
+                    "fuzzy_enabled": shaper.fuzzy_enabled
                 })
 
             return {
@@ -658,6 +703,7 @@ class InterfaceSession:
                 "router_ip": self.router_ip,
                 "operational_mode": self.operational_mode,
                 "limit_mbps": self.limit_mbps,
+                "fuzzy_enabled": self.fuzzy_enabled,
                 "uptime": uptime,
                 "target_count": len(self.targets),
                 "total_speed_kbps": round(total_speed_kbps, 1),
