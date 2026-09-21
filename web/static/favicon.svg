@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c1427" />
+      <stop offset="100%" stop-color="#050811" />
+    </linearGradient>
+
+    <!-- Electric Cyan-Blue Lightning Gradient -->
+    <linearGradient id="boltGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" />
+      <stop offset="50%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#4facfe" />
+    </linearGradient>
+
+    <!-- Border Highlight Gradient -->
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#4facfe" stop-opacity="0.2" />
+    </linearGradient>
+
+    <!-- Outer Glow Filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2.5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Subtle Inner Bolt Glow -->
+    <filter id="boltGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="1.8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Squircle / Rounded Dark Base -->
+  <rect x="2" y="2" width="60" height="60" rx="16" ry="16" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="2" />
+
+  <!-- Outer Neon Pulse Ring (Subtle) -->
+  <rect x="5" y="5" width="54" height="54" rx="13" ry="13" fill="none" stroke="#00f2fe" stroke-width="1" stroke-opacity="0.15" />
+
+  <!-- Glow Shadow Layer for Lightning Bolt -->
+  <path d="M35 8 L19 32 L31 32 L27 56 L45 28 L33 28 Z" fill="#00f2fe" opacity="0.45" filter="url(#glow)" />
+
+  <!-- Primary Razor Lightning Bolt -->
+  <path d="M35 8 L19 32 L31 32 L27 56 L45 28 L33 28 Z" fill="url(#boltGrad)" filter="url(#boltGlow)" />
+
+  <!-- Sharp Highlight Accent -->
+  <path d="M34 11 L22 31 L31 31 L28 50 L42 29 L33 29 Z" fill="#ffffff" opacity="0.25" />
+</svg>

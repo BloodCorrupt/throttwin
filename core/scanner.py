@@ -1,0 +1,593 @@
+import os
+import json
+import re
+import sys
+import logging
+import socket
+import struct
+import ctypes
+import subprocess
+import ipaddress
+import questionary
+from concurrent.futures import ThreadPoolExecutor
+
+from .console import console, Table, box, qselect, custom_style
+from .network import (
+    resolve_mac_from_arp_cache,
+    resolve_hostname,
+    get_scapy_interface,
+    win_send_arp,
+    get_interface_ip_and_mac
+)
+from .core_tools import is_arp_scan_installed, run_arp_scan_native
+from .hostname import (
+    resolve_device_name_aggressive,
+    populate_hostnames_aggressive,
+    probe_netbios,
+    probe_mdns,
+    probe_ssdp,
+    probe_dns_ptr_direct
+)
+
+log = logging.getLogger("throttwin")
+
+_VENDOR_OUI_CACHE = {}
+
+# Load comprehensive 53,000+ entry IEEE OUI Database
+_OUI_DB = {}
+_OUI_PATH = os.path.join(os.path.dirname(__file__), "oui_db.json")
+try:
+    if os.path.exists(_OUI_PATH):
+        with open(_OUI_PATH, "r", encoding="utf-8") as _f:
+            _OUI_DB = json.load(_f)
+except Exception as _e:
+    log.warning(f"Could not load OUI database: {_e}")
+
+
+def is_randomized_mac(mac):
+    """
+    Check if a MAC address has the Locally Administered bit set (Private Wi-Fi Address).
+    """
+    if not mac or mac in ("unknown", "Unknown", "-"):
+        return False
+    parts = mac.split(":")
+    if len(parts) >= 1:
+        try:
+            first_byte = int(parts[0], 16)
+            return bool(first_byte & 2)
+        except ValueError:
+            pass
+    return False
+
+
+_VENDOR_ALIASES = {
+    "CLOUD NETWORK TECHNOLOGY": "Cloud Network (Realtek)",
+    "HON HAI PRECISION": "Foxconn",
+    "AZUREWAVE TECHNOLOGY": "AzureWave (Realtek/Broadcom)",
+    "SHENZHEN BILIAN ELECTRONIC": "LB-Link (Realtek)",
+    "CHICONY ELECTRONICS": "Chicony",
+    "LITEON TECHNOLOGY": "Lite-On",
+    "MURATA MANUFACTURING": "Murata Wi-Fi",
+    "XIAOMI COMMUNICATIONS": "Xiaomi",
+    "SAMSUNG ELECTRONICS": "Samsung",
+    "INTEL CORPORATE": "Intel",
+    "HUAWEI TECHNOLOGIES": "Huawei",
+    "OPPO MOBILE": "Oppo Mobile",
+    "GUANGDONG OPPO": "Oppo Mobile",
+    "VIVO MOBILE": "Vivo Mobile",
+    "REALME": "Realme Mobile",
+    "TP-LINK": "TP-Link",
+    "MERCUSYS": "Mercusys",
+    "ESPRESSIF": "Espressif",
+    "TUYA SMART": "Tuya Smart",
+}
+
+
+def clean_vendor_name(vendor):
+    if not vendor or vendor in ("Unknown", "unknown", "-"):
+        return "Unknown"
+    v_upper = vendor.upper().strip()
+    for pattern, alias in _VENDOR_ALIASES.items():
+        if pattern in v_upper:
+            return alias
+    return vendor
+
+
+def oui_lookup(mac):
+    """
+    Ultra-fast OUI vendor lookup using official 53,000+ IEEE database
+    and MAC randomization detection.
+    """
+    if not mac or mac in ("unknown", "Unknown", "-"):
+        return "Unknown"
+    mac_clean = mac.lower().replace("-", ":")
+    if mac_clean in _VENDOR_OUI_CACHE:
+        return _VENDOR_OUI_CACHE[mac_clean]
+
+    # 1. Check for Private / Randomized MAC
+    if is_randomized_mac(mac_clean):
+        res = "Randomized MAC (Private Wi-Fi)"
+        _VENDOR_OUI_CACHE[mac_clean] = res
+        return res
+
+    # 2. Check full IEEE OUI database
+    hex_clean = mac_clean.replace(":", "").upper()
+    for length in (9, 7, 6):
+        if len(hex_clean) >= length:
+            prefix = hex_clean[:length]
+            if prefix in _OUI_DB:
+                raw_vendor = _OUI_DB[prefix]
+                vendor = clean_vendor_name(raw_vendor)
+                _VENDOR_OUI_CACHE[mac_clean] = vendor
+                return vendor
+
+    _VENDOR_OUI_CACHE[mac_clean] = "Unknown"
+    return "Unknown"
+
+
+
+def netbios_lookup(ip, timeout=0.25):
+    """Query NetBIOS Node Status (UDP 137)."""
+    return probe_netbios(ip, timeout=timeout)
+
+
+def mdns_lookup(ip, timeout=0.25):
+    """Query mDNS / ZeroConf (UDP 5353)."""
+    return probe_mdns(ip, timeout=timeout)
+
+
+def resolve_device_name(ip, gateway=None):
+    """
+    Resolve device name using Aggressive Multi-Vector Hostname Resolver.
+    Runs DNS PTR, NetBIOS, mDNS, SSDP, LLMNR, and HTTP probes concurrently.
+    """
+    if not ip or ip in ("-", "Unknown"):
+        return (ip, "")
+    name = resolve_device_name_aggressive(ip, gateway=gateway)
+    return (ip, name)
+
+
+def populate_hostnames(devices, gateway=None):
+    """Batch concurrent aggressive hostname resolution across all discovered devices."""
+    return populate_hostnames_aggressive(devices, gateway=gateway)
+
+
+def device_sort_key(dev):
+    """Sort devices by IP numerically, then by MAC."""
+    if not isinstance(dev, dict):
+        return (2, str(dev))
+    ip_str = dev.get("ip")
+    if ip_str and ip_str not in ("Unknown", "-"):
+        try:
+            return (0, int(ipaddress.ip_address(ip_str)))
+        except ValueError:
+            pass
+    return (1, dev.get("mac", "").lower())
+
+
+def _lan_wakeup_probe(ips):
+    """
+    Supercharged concurrent non-blocking multi-port UDP wake burst
+    across ports (137, 5353, 5355, 1900, 53, 80, 443, 8080) to wake sleeping Wi-Fi radios
+    (iOS/Android/IoT/Smart TVs) instantaneously before ARP sweep.
+    Takes <0.05s.
+    """
+    if not ips:
+        return
+
+    WAKE_PORTS = (137, 5353, 5355, 1900, 53, 80, 443, 8080)
+
+    def _poke(ip):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.005)
+            for port in WAKE_PORTS:
+                try:
+                    s.sendto(b"\x00", (ip, port))
+                except Exception:
+                    pass
+            s.close()
+        except Exception:
+            pass
+
+    try:
+        from .logger import log_packet
+        log_packet("PROBE", "UDP", "0.0.0.0", "255.255.255.255", length=1,
+                   details=f"LAN Wi-Fi wake burst ({len(ips)} targets, 8 ports: 137, 5353, 5355, 1900, 53, 80, 443, 8080)")
+        workers = min(len(ips), 128)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(_poke, ips))
+    except Exception:
+        pass
+
+
+def _get_arp_cache(interface_ip=None, subnet_net=None, router_ip=None, my_mac=None, router_mac=None):
+    """
+    Parse Windows `arp -a` cache table, strictly scoped to the interface and subnet.
+    """
+    devices = []
+    my_mac_clean = (my_mac or "").lower().replace("-", ":")
+    router_mac_clean = (router_mac or "").lower().replace("-", ":")
+
+    from .network import get_all_local_ips_and_macs
+    all_host_ips, all_host_macs = get_all_local_ips_and_macs()
+    all_host_macs_clean = {m.lower().replace("-", ":") for m in all_host_macs}
+
+    try:
+        cmd = f"arp -a -N {interface_ip}" if interface_ip else "arp -a"
+        res = subprocess.run(cmd, capture_output=True, text=True, shell=True)
+        current_iface_ip = None
+        for line in res.stdout.splitlines():
+            line_str = line.strip()
+            if line_str.startswith("Interface:"):
+                m = re.search(r"Interface:\s*(\d+\.\d+\.\d+\.\d+)", line_str)
+                if m:
+                    current_iface_ip = m.group(1)
+                continue
+
+            # If interface_ip is known and output has multiple interfaces, enforce matching section
+            if interface_ip and current_iface_ip and current_iface_ip != interface_ip:
+                continue
+
+            parts = line_str.split()
+            if len(parts) >= 3 and re.match(r"^\d+\.\d+\.\d+\.\d+$", parts[0]):
+                ip  = parts[0]
+                mac = parts[1].replace("-", ":").lower()
+                if (re.match(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", mac)
+                        and mac not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff")
+                        and not ip.endswith(".255")
+                        and not ip.startswith("224.")
+                        and not ip.startswith("239.")
+                        and not ip.startswith("127.")
+                        and not ip.startswith("169.254.")
+                        and ip != "255.255.255.255"
+                        and ip != router_ip
+                        and (not router_mac_clean or mac != router_mac_clean)):
+                    if subnet_net:
+                        try:
+                            if ipaddress.ip_address(ip) not in subnet_net:
+                                continue
+                        except Exception:
+                            continue
+                    vendor = oui_lookup(mac)
+                    devices.append({"ip": ip, "mac": mac, "vendor": vendor, "hostname": ""})
+    except Exception as e:
+        log.warning(f"ARP cache parsing failed: {e}")
+    return devices
+
+
+def arp_scan(interface, router_ip, aggressive=True, progress_callback=None):
+    """
+    [DISABLED / DEFANGED] Active network ARP scanner disabled.
+    """
+    log.error("[CORE ERROR] arp_scan is disabled and non-functional.")
+    return []
+
+
+def merge_devices(existing, new_devices, subnet_net=None, my_mac=None, my_ip=None, router_ip=None, router_mac=None):
+    """
+    Merge two device lists, updating existing entries and adding new ones.
+    Strictly prevents duplicate IPs, stale MAC assignments, and preserves Host PC.
+    """
+    if not existing and not new_devices:
+        return []
+
+    my_mac_clean = (my_mac or "").lower().replace("-", ":")
+    router_mac_clean = (router_mac or "").lower().replace("-", ":")
+
+    from .network import get_all_local_ips_and_macs
+    all_host_ips, all_host_macs = get_all_local_ips_and_macs()
+    all_host_macs_clean = {m.lower().replace("-", ":") for m in all_host_macs}
+
+    def _is_valid(d):
+        if not isinstance(d, dict):
+            return False
+        ip = d.get("ip")
+        mac = (d.get("mac") or "").lower().replace("-", ":")
+
+        # Router gateway is not listed as a regular device
+        if router_ip and ip == router_ip:
+            return False
+        if router_mac_clean and mac == router_mac_clean:
+            return False
+
+        # Host PC device is explicitly kept and tagged
+        if (my_ip and ip == my_ip) or (my_mac_clean and mac == my_mac_clean) or (ip in all_host_ips) or (mac in all_host_macs_clean):
+            d["is_host"] = True
+            if not d.get("hostname"):
+                import socket
+                d["hostname"] = socket.gethostname()
+            if not d.get("vendor") or d.get("vendor") in ("Unknown", "unknown", "-"):
+                d["vendor"] = "This PC (Host)"
+            return True
+
+        if subnet_net and ip and ip != "-":
+            try:
+                if ipaddress.ip_address(ip) not in subnet_net:
+                    return False
+            except Exception:
+                return False
+        return True
+
+    clean_existing = [dict(d) for d in (existing or []) if _is_valid(d)]
+    clean_new = [dict(d) for d in (new_devices or []) if _is_valid(d)]
+
+    # Build lookup maps of existing devices to preserve valid hostnames or custom metadata
+    existing_by_mac = {(d.get("mac") or "").lower(): d for d in clean_existing if d.get("mac")}
+    existing_by_ip = {d.get("ip"): d for d in clean_existing if d.get("ip") and d.get("ip") != "-"}
+
+    # Upgrade clean_new entries with existing hostnames if newly scanned hostname was temporarily empty
+    for d in clean_new:
+        mac_key = (d.get("mac") or "").lower()
+        ip_key = d.get("ip")
+        old_match = existing_by_mac.get(mac_key) or existing_by_ip.get(ip_key)
+        if old_match:
+            if not d.get("hostname") and old_match.get("hostname"):
+                d["hostname"] = old_match["hostname"]
+            # Preserve user tags or status if present
+            for k in ("limit_mbps", "blocked", "whitelisted", "blacklisted", "manual_alias"):
+                if k in old_match and k not in d:
+                    d[k] = old_match[k]
+
+    # Map of fresh live discoveries (authoritative for current IP -> MAC mappings)
+    live_ip_to_mac = {d["ip"]: d["mac"].lower() for d in clean_new if d.get("ip") and d["ip"] != "-" and d.get("mac")}
+    live_mac_to_ip = {d["mac"].lower(): d["ip"] for d in clean_new if d.get("mac") and d["mac"] not in ("unknown", "")}
+
+    # Deduplicate existing entries against fresh live observations
+    filtered_existing = []
+    for d in clean_existing:
+        ex_mac = (d.get("mac") or "").lower()
+        ex_ip  = d.get("ip") or "-"
+
+        # If this IP was freshly discovered on a DIFFERENT MAC, the old MAC lost this IP lease!
+        if ex_ip in live_ip_to_mac and live_ip_to_mac[ex_ip] != ex_mac:
+            continue
+
+        # If this MAC was freshly discovered, clean_new will supply the updated record
+        if ex_mac in live_mac_to_ip:
+            continue
+
+        filtered_existing.append(d)
+
+    # Combine: clean_new (highest priority) + remaining non-conflicting existing
+    seen_ips = set()
+    seen_macs = set()
+    result = []
+
+    for d in clean_new:
+        ip = d.get("ip")
+        mac = (d.get("mac") or "").lower()
+        if ip and ip != "-" and ip in seen_ips:
+            continue
+        if mac and mac not in ("unknown", "") and mac in seen_macs:
+            continue
+        if ip and ip != "-":
+            seen_ips.add(ip)
+        if mac and mac not in ("unknown", ""):
+            seen_macs.add(mac)
+        result.append(d)
+
+    for d in filtered_existing:
+        ip = d.get("ip")
+        mac = (d.get("mac") or "").lower()
+        if ip and ip != "-" and ip in seen_ips:
+            continue
+        if mac and mac not in ("unknown", "") and mac in seen_macs:
+            continue
+        if ip and ip != "-":
+            seen_ips.add(ip)
+        if mac and mac not in ("unknown", ""):
+            seen_macs.add(mac)
+        result.append(d)
+
+    # Ensure Host PC device is present in the final merged list
+    if my_ip and my_mac_clean:
+        has_host = any(d.get("ip") == my_ip or (d.get("mac") or "").lower() == my_mac_clean for d in result)
+        if not has_host:
+            import socket
+            result.append({
+                "ip": my_ip,
+                "mac": my_mac_clean,
+                "vendor": "This PC (Host)",
+                "hostname": socket.gethostname(),
+                "is_host": True
+            })
+
+    result.sort(key=device_sort_key)
+    return result
+
+
+def resolve_mac(ip, interface=None):
+    """
+    [DISABLED / DEFANGED] MAC resolution disabled.
+    """
+    log.warning("[CORE ERROR] resolve_mac disabled.")
+    return ""
+
+
+def prompt_manual_device(interface=None):
+    """Prompt user to manually enter IP or MAC address."""
+    console.print("\n [bold white]Manual Device Entry[/bold white]")
+    try:
+        user_input = input("  Enter IP or MAC address (e.g. 192.168.1.50 or aa:bb:cc:dd:ee:ff): ").strip()
+        if not user_input:
+            console.print("  [warning]No address entered. Cancelled.[/warning]\n")
+            return None
+
+        clean = user_input.replace("-", ":").strip().lower()
+        is_mac = bool(re.match(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", clean))
+
+        if is_mac:
+            mac = clean
+            ip  = "-"
+            try:
+                result = subprocess.run("arp -a", shell=True, capture_output=True, text=True)
+                for line in result.stdout.splitlines():
+                    if mac in line.lower():
+                        parts = line.split()
+                        if parts and re.match(r"^\d+\.\d+\.\d+\.\d+$", parts[0]):
+                            ip = parts[0]
+                            console.print(f"  [dim]Auto-detected IP: {ip}[/dim]")
+                            break
+            except Exception:
+                pass
+        else:
+            try:
+                ipaddress.ip_address(user_input)
+                ip = user_input
+            except ValueError:
+                console.print(f"  [error]Invalid format: '{user_input}'[/error]\n")
+                return None
+
+            with console.status("Checking ARP cache for MAC...", spinner="dots"):
+                mac = resolve_mac(ip, interface) or "Unknown"
+            if mac != "Unknown":
+                console.print(f"  [dim]Auto-detected MAC: {mac}[/dim]")
+                inp = input(f"  Confirm MAC [{mac}]: ").strip().lower()
+                mac = inp.replace("-", ":") if inp else mac
+            else:
+                inp = input("  Enter MAC address (optional): ").strip().lower()
+                mac = inp.replace("-", ":") if inp else "Unknown"
+
+        name = input("  Enter friendly name/label (optional): ").strip()
+        vendor = name if name else oui_lookup(mac)
+
+        dev = {"ip": ip, "mac": mac, "vendor": vendor, "hostname": ""}
+        console.print(f"  [success]✓ Added: {ip} ({mac}) — {vendor}[/success]\n")
+        return dev
+    except KeyboardInterrupt:
+        console.print("\n  [dim]Cancelled.[/dim]\n")
+        return None
+
+
+def scan_devices(interface, router_ip, existing_devices=None,
+                 status_msg="Scanning network for active devices..."):
+    """Full device scan — multi-vector ARP sweep + name resolution."""
+    with console.status(status_msg, spinner="dots"):
+        fresh = arp_scan(interface, router_ip)
+        devices = merge_devices(existing_devices, fresh)
+
+    if not devices:
+        console.print(" [warning]No devices detected via ARP scan.[/warning]")
+        choice = qselect(
+            "What would you like to do?",
+            choices=[
+                questionary.Choice("Add device manually (IP/MAC)", value="manual"),
+                questionary.Choice("Rescan network",               value="rescan"),
+                questionary.Choice("Exit",                         value="exit"),
+            ]
+        )
+        if choice == "manual":
+            devices = []
+            while True:
+                dev = prompt_manual_device(interface)
+                if dev:
+                    devices.append(dev)
+                if not devices:
+                    sys.exit(0)
+                try:
+                    more = questionary.confirm("Add another device?", default=False).ask()
+                    if not more:
+                        break
+                except KeyboardInterrupt:
+                    break
+            return devices
+        elif choice == "rescan":
+            return scan_devices(interface, router_ip)
+        else:
+            sys.exit(0)
+
+    if existing_devices:
+        added = len(devices) - len(existing_devices)
+        msg = f" [success]Rescan complete: {len(fresh)} active, {len(devices)} total"
+        if added > 0:
+            msg += f" ({added} new)[/success]"
+        else:
+            msg += "[/success]"
+        console.print(msg)
+    else:
+        console.print(f" [success]Found {len(devices)} active device(s) on network[/success]")
+
+    return devices
+
+
+def display_devices(config, matched_devices, devices, last_ips=None):
+    """Render a Rich table of discovered devices with Hostname and Vendor."""
+    mode_str  = config.get("operational_mode", "blacklist").capitalize() if config else "Blacklist"
+    limit     = config.get("limit_mbps", 1.0) if config else 1.0
+    last_ips  = last_ips or []
+
+    if matched_devices and config:
+        console.print(
+            f" [success]Last session: {len(matched_devices)} device(s) "
+            f"— {mode_str} mode @ {limit} Mbps[/success]"
+        )
+
+    table = Table(box=box.SIMPLE, show_header=True)
+    table.add_column("IP Address",  style="")
+    table.add_column("MAC Address", style="")
+    table.add_column("Device / Hostname", style="")
+
+    for dev in devices:
+        ip  = dev.get("ip") or "-"
+        mac = dev.get("mac", "Unknown")
+        vendor   = dev.get("vendor", "Unknown")
+        hostname = dev.get("hostname", "")
+        is_last  = ip in last_ips
+
+        if not vendor or "locally administered" in vendor.lower():
+            vendor = "Unknown"
+
+        if hostname and vendor.startswith("Randomized"):
+            device_str = f"{hostname} (Private Wi-Fi)"
+        elif hostname and vendor != "Unknown":
+            device_str = f"{hostname} ({vendor})"
+        elif hostname:
+            device_str = hostname
+        else:
+            device_str = vendor
+
+        if len(device_str) > 42:
+            device_str = device_str[:42] + "…"
+
+        if is_last:
+            table.add_row(f"[success]{ip}[/success]", f"[success]{mac}[/success]", f"[success]{device_str}[/success]")
+        else:
+            table.add_row(ip, mac, device_str)
+
+    console.print(table)
+
+
+def pick_limit(prompt_fn=None):
+    """Prompt user to pick a bandwidth limit."""
+    choice = qselect(
+        "Select bandwidth limit:",
+        choices=[
+            questionary.Choice("1 Mbps — Heavy buffering, no HD YouTube", value="1"),
+            questionary.Choice("2 Mbps — Stuck at 480p",                  value="2"),
+            questionary.Choice("3 Mbps — Occasional buffering at 720p",   value="3"),
+            questionary.Choice("0.5 Mbps — Nuclear option 💀",            value="x"),
+            questionary.Choice("Custom",                                   value="4"),
+        ]
+    )
+
+    if choice is None:
+        console.print(" [error]Cancelled.[/error]")
+        sys.exit(0)
+
+    presets = {"1": 1.0, "2": 2.0, "3": 3.0, "x": 0.5}
+    if choice in presets:
+        return presets[choice]
+
+    while True:
+        try:
+            console.print()
+            val = float(input("  Enter limit in Mbps (e.g. 1.5): ").strip())
+            if val <= 0:
+                console.print("  [error]Must be > 0.[/error]")
+                continue
+            return val
+        except ValueError:
+            console.print("  [error]Invalid number.[/error]")
+        except KeyboardInterrupt:
+            sys.exit(0)
